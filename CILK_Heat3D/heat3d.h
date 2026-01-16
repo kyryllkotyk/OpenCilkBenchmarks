@@ -8,6 +8,17 @@
 
 #include <cilk/cilk.h> // CILK
 
+#include <sys/stat.h>  // mkdir
+#include <sys/types.h>
+#include <cerrno>      // errno
+
+#include <sstream>
+#include <iomanip>
+#include <string>
+#include <fstream>
+#include <cstring>
+#include <stdexcept>
+
 using namespace std;
 class Heat3D
 {
@@ -16,7 +27,7 @@ public:
 
   /*
     @brief Splits the given grid into blocks and calculates the heat value for every cell.
-    Modifies the given grid.
+    Modifies the given grid. 
 
     @param grid 1D array with the size of (gridX + 2) * (gridY + 2) * (gridZ + 2).
     To convert from a 3D array, perform row flattening with z as the fast varying
@@ -32,14 +43,19 @@ public:
 
     @return Halo time & execution time for each run
   */
-  vector<pair<uint64_t, uint64_t>> runBenchmark(vector<float>& grid, 
+  vector<pair<uint64_t, uint64_t>> runBenchmark(vector<double>& grid, 
     const short gridX, const short gridY, const short gridZ, 
     const short timesteps, const float alpha, const float beta,
     const short decompX, const short decompY, const short decompZ,
-    const short totalRuns, const short warmupRuns);
+    const short totalRuns, const short warmupRuns, const short screenshotEvery);
 
-  // void runBenchmarkWithoutPadding
-  // void runBenchmarkFrom3DVector
+  // Writes to a VTI file based on specified file format:
+  // heat3d_t{timestep:05d}_loc{locality:05d}.vti
+  void writeToFile(vector<double>& grid, int timestep, int locality,
+    int nx, int ny, int nz, string directory);
+
+  void writePvd(const std::vector<int>& writtenTimesteps,
+    int numLocalities, const std::string& directory
 };
 
 #endif
