@@ -40,6 +40,7 @@ public:
     (Without padding)
     @param totalRuns How many times to perform the same benchmark
     @param warmupRuns How many times to perform the benchmark BEFORE recording
+    @param borderType 'd' - Dirichlet, 'i' - Insulated, 'h' - Heater Window
 
     @return Halo time & execution time for each run
   */
@@ -47,7 +48,8 @@ public:
     const short gridX, const short gridY, const short gridZ, 
     const short timesteps, const float alpha, const float beta,
     const short decompX, const short decompY, const short decompZ,
-    const short totalRuns, const short warmupRuns, const short screenshotEvery);
+    const short totalRuns, const short warmupRuns, const short screenshotEvery,
+    const char borderType);
 
   // Writes to a VTI file based on specified file format:
   // heat3d_t{timestep:05d}_loc{locality:05d}.vti
@@ -55,7 +57,7 @@ public:
     int nx, int ny, int nz, string directory);
 
   void writePvd(const std::vector<int>& writtenTimesteps,
-    int numLocalities, const std::string& directory
+    int numLocalities, const std::string& directory);
 };
 
 #endif
