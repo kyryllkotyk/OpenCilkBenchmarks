@@ -1,13 +1,14 @@
 #include "heat3d.h"
 
-static std::string pad5(int x); // forward declaration
+// forward declaration
+static std::string pad5(int x); 
 
 vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
   const short gridX, const short gridY, const short gridZ,
   const short timesteps, const float alpha, const float beta,
   const short decompX, const short decompY, const short decompZ,
   const short totalRuns, const short warmupRuns,
-  const short screenshotEvery) {
+  const short screenshotEvery, const char borderType) {
   // Ensure that the grid size matches the given size parameters
   if (grid.size() != (gridX + 2) * (gridY + 2) * (gridZ + 2)) {
     exit(0);
@@ -46,31 +47,65 @@ vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
         writtenTimesteps.push_back(i);
       }
 
-      // Start measuring halo time here
-      auto haloTimeStart = std::chrono::steady_clock::now();
+      switch (borderType) {
+      case('d'): /* Dirichlet */
+        // Start measuring halo time here
+        auto haloTimeStart = std::chrono::steady_clock::now();
 
-      // Halos - Set the boundaries to be equal to the nearest valid cell 
-      // on the respective axis 
-      // X halos
-      for (int y = 1; y <= gridY; y++) {
-        for (int z = 1; z <= gridZ; z++) {
-          grid[IDX(0, y, z)] = grid[IDX(1, y, z)];
-          grid[IDX(gridX + 1, y, z)] = grid[IDX(gridX, y, z)];
+        // Halos - Set the boundaries to be equal to the nearest valid cell 
+        // on the respective axis 
+        // X halos
+        for (int y = 1; y <= gridY; y++) {
+          for (int z = 1; z <= gridZ; z++) {
+            grid[IDX(0, y, z)] = 0;
+            grid[IDX(gridX + 1, y, z)] = 0;
+          }
         }
-      }
-      // Y halos
-      for (int x = 0; x <= gridX + 1; x++) {
-        for (int z = 1; z <= gridZ; z++) {
-          grid[IDX(x, 0, z)] = grid[IDX(x, 1, z)];
-          grid[IDX(x, gridY + 1, z)] = grid[IDX(x, gridY, z)];
+        // Y halos
+        for (int x = 0; x <= gridX + 1; x++) {
+          for (int z = 1; z <= gridZ; z++) {
+            grid[IDX(x, 0, z)] = 0;
+            grid[IDX(x, gridY + 1, z)] = 0;
+          }
         }
-      }
-      // Z halos
-      for (int x = 0; x <= gridX + 1; x++) {
-        for (int y = 0; y <= gridY + 1; y++) {
-          grid[IDX(x, y, 0)] = grid[IDX(x, y, 1)];
-          grid[IDX(x, y, gridZ + 1)] = grid[IDX(x, y, gridZ)];
+        // Z halos
+        for (int x = 0; x <= gridX + 1; x++) {
+          for (int y = 0; y <= gridY + 1; y++) {
+            grid[IDX(x, y, 0)] = 0;
+            grid[IDX(x, y, gridZ + 1)] = 0;
+          }
         }
+
+      case('i'): /* Insulated */
+        // Start measuring halo time here
+        auto haloTimeStart = std::chrono::steady_clock::now();
+
+        // Halos - Set the boundaries to be equal to the nearest valid cell 
+        // on the respective axis 
+        // X halos
+        for (int y = 1; y <= gridY; y++) {
+          for (int z = 1; z <= gridZ; z++) {
+            grid[IDX(0, y, z)] = grid[IDX(1, y, z)];
+            grid[IDX(gridX + 1, y, z)] = grid[IDX(gridX, y, z)];
+          }
+        }
+        // Y halos
+        for (int x = 0; x <= gridX + 1; x++) {
+          for (int z = 1; z <= gridZ; z++) {
+            grid[IDX(x, 0, z)] = grid[IDX(x, 1, z)];
+            grid[IDX(x, gridY + 1, z)] = grid[IDX(x, gridY, z)];
+          }
+        }
+        // Z halos
+        for (int x = 0; x <= gridX + 1; x++) {
+          for (int y = 0; y <= gridY + 1; y++) {
+            grid[IDX(x, y, 0)] = grid[IDX(x, y, 1)];
+            grid[IDX(x, y, gridZ + 1)] = grid[IDX(x, y, gridZ)];
+          }
+        }
+
+      case('h'): /* Heater Window */
+        break;
       }
 
       // Stop measuring halo time here
@@ -141,6 +176,10 @@ vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
 
   return timesPerRunUs;
 }
+
+
+
+
 
 void Heat3D::writeToFile(vector<double>& grid, int timestep, int locality,
   int nx, int ny, int nz, string directory)
