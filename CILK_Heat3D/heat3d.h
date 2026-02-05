@@ -27,7 +27,7 @@ public:
 
   /*
     @brief Splits the given grid into blocks and calculates the heat value for every cell.
-    Modifies the given grid. 
+    Modifies the given grid.
 
     @param grid 1D array with the size of (gridX + 2) * (gridY + 2) * (gridZ + 2).
     To convert from a 3D array, perform row flattening with z as the fast varying
@@ -36,16 +36,16 @@ public:
     @param timesteps How many steps (updates) to perform
     @param alpha Constant value for the update formula for this cell's value importance
     @param beta Constant value for the update formula for neighbor cell's value importance
-    @param decompX, decompY, decompZ Dimension size of the block to split grid into 
+    @param decompX, decompY, decompZ Dimension size of the block to split grid into
     (Without padding)
     @param totalRuns How many times to perform the same benchmark
     @param warmupRuns How many times to perform the benchmark BEFORE recording
     @param borderType 'd' - Dirichlet, 'i' - Insulated, 'h' - Heater Window
 
-    @return Halo time & execution time for each run
+    @return Halo time, execution time, and checksum for each run
   */
-  vector<pair<uint64_t, uint64_t>> runBenchmark(vector<double>& grid, 
-    const short gridX, const short gridY, const short gridZ, 
+  vector<pair<pair<uint64_t, uint64_t>, double>> runBenchmark(vector<double>& grid,
+    const short gridX, const short gridY, const short gridZ,
     const short timesteps, const float alpha, const float beta,
     const short decompX, const short decompY, const short decompZ,
     const short totalRuns, const short warmupRuns, const short screenshotEvery,
