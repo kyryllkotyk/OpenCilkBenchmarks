@@ -1,9 +1,10 @@
 #include "heat3d.h"
 
 // forward declaration
-static std::string pad5(int x); 
+static std::string pad5(int x);
 
-vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
+
+vector<pair<pair<uint64_t, uint64_t>, double>> Heat3D::runBenchmark(vector<double>& grid,
   const short gridX, const short gridY, const short gridZ,
   const short timesteps, const float alpha, const float beta,
   const short decompX, const short decompY, const short decompZ,
@@ -25,10 +26,11 @@ vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
   // Y, Z = gridY + 2, gridZ + 2
 #define IDX(x,y,z) ((x) * strideX + (y) * Z + (z))
 
-  // Storage for halo & execution times
-  vector<pair<uint64_t, uint64_t>> timesPerRunUs(totalRuns);
+  // Storage for halo & execution times & checksum
+  vector<pair<pair<uint64_t, uint64_t>, double>> returnInfo(totalRuns);
   // Accumulated halo & execution times PER RUN
   uint64_t accumulatedHaloTime = 0, accumulatedExecutionTime = 0;
+  double checksum = 0.0;
 
   // Grid for t + 1
   vector<double> newGrid = grid;
@@ -47,12 +49,11 @@ vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
         writtenTimesteps.push_back(i);
       }
 
+      // Start measuring halo time here
+      auto haloTimeStart = std::chrono::steady_clock::now();
       switch (borderType) {
       case('d'): /* Dirichlet */
-        // Start measuring halo time here
-        auto haloTimeStart = std::chrono::steady_clock::now();
-
-        // Halos - Set the boundaries to be equal to the nearest valid cell 
+        // Halos - Set the boundaries to be equal to 0
         // on the respective axis 
         // X halos
         for (int y = 1; y <= gridY; y++) {
@@ -75,10 +76,9 @@ vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
             grid[IDX(x, y, gridZ + 1)] = 0;
           }
         }
+        break;
 
       case('i'): /* Insulated */
-        // Start measuring halo time here
-        auto haloTimeStart = std::chrono::steady_clock::now();
 
         // Halos - Set the boundaries to be equal to the nearest valid cell 
         // on the respective axis 
@@ -103,6 +103,35 @@ vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
             grid[IDX(x, y, gridZ + 1)] = grid[IDX(x, y, gridZ)];
           }
         }
+        break;
+
+      case('p'): { /* Periodic */
+        // X halos wrap (left/right)
+        for (int y = 1; y <= gridY; y++) {
+          for (int z = 1; z <= gridZ; z++) {
+            grid[IDX(0, y, z)] = grid[IDX(gridX, y, z)];
+            grid[IDX(gridX + 1, y, z)] = grid[IDX(1, y, z)];
+          }
+        }
+
+        // Y halos wrap (bottom/top)
+        for (int x = 0; x <= gridX + 1; x++) {
+          for (int z = 1; z <= gridZ; z++) {
+            grid[IDX(x, 0, z)] = grid[IDX(x, gridY, z)];
+            grid[IDX(x, gridY + 1, z)] = grid[IDX(x, 1, z)];
+          }
+        }
+
+        // Z halos wrap (front/back)
+        for (int x = 0; x <= gridX + 1; x++) {
+          for (int y = 0; y <= gridY + 1; y++) {
+            grid[IDX(x, y, 0)] = grid[IDX(x, y, gridZ)];
+            grid[IDX(x, y, gridZ + 1)] = grid[IDX(x, y, 1)];
+          }
+        }
+
+        break;
+      }
 
       case('h'): /* Heater Window */
         break;
@@ -168,13 +197,23 @@ vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
 
     // Record times only if it's no longer a warmup run
     if (runs >= warmupRuns) {
-      timesPerRunUs[runs - warmupRuns] = { accumulatedHaloTime, accumulatedExecutionTime };
+      // Calculate checksum
+      for (int x = 1; x <= gridX; x++) {
+        for (int y = 1; y <= gridY; y++) {
+          for (int z = 1; z <= gridZ; z++) {
+            checksum += grid[IDX(x, y, z)];
+          }
+        }
+      }
+   
+      returnInfo[runs - warmupRuns] = { {accumulatedHaloTime, accumulatedExecutionTime}, checksum };
     }
     accumulatedHaloTime = 0;
     accumulatedExecutionTime = 0;
+    checksum = 0.0;
   }
 
-  return timesPerRunUs;
+  return returnInfo;
 }
 
 
@@ -182,8 +221,7 @@ vector<pair<uint64_t, uint64_t>> Heat3D::runBenchmark(vector<double>& grid,
 
 
 void Heat3D::writeToFile(vector<double>& grid, int timestep, int locality,
-  int nx, int ny, int nz, string directory)
-{
+  int nx, int ny, int nz, string directory) {
   if (grid.size() != (nx + 2) * (ny + 2) * (nz + 2)) {
     return;
   }
