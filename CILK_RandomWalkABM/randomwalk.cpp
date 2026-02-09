@@ -1,6 +1,6 @@
 #include "randomwalk.h"
 
-void RandomWalk::runBenchmark(std::vector<std::vector<int>>& grid,
+void RandomWalk::runBenchmarkPrototype(std::vector<std::vector<int>>& grid,
   std::vector<Agent>& agents, const short timeSteps) {
   
   //TODO:: Add guarding for misinput
@@ -101,11 +101,11 @@ void RandomWalk::runBenchmark(std::vector<std::vector<int>>& grid,
 }
 
 inline uint64_t RandomWalk::Xoshiro256::splitmix64(uint64_t& x) {
-    x += 0x9e3779b97f4a7c15ULL;
-    uint64_t z = x;
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-    return z ^ (z >> 31);
+  x += 0x9e3779b97f4a7c15ULL;
+  uint64_t z = x;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+  return z ^ (z >> 31);
 }
 
 RandomWalk::Xoshiro256::Xoshiro256(uint64_t seed) {
@@ -142,4 +142,121 @@ uint64_t RandomWalk::Xoshiro256::nextInRange(uint64_t min, uint64_t max) {
   } while (x >= limit);
 
   return min + (x % range);
+}
+
+
+void RandomWalk::runBenchmark(
+  const unsigned int height, const unsigned int width, const unsigned int agentCount,
+  const unsigned int growthRate, const unsigned int timeSteps,
+  const unsigned int sugarCapacityMin, const unsigned int sugarCapacityMax,
+  const unsigned int metabolismMin, const unsigned int metabolismMax,
+  const unsigned int visionMin, const unsigned int visionMax, 
+  unsigned int initialWealth) {
+  
+  // Error checking block
+  // Empty grid
+  if (height == 0 || width == 0) {
+    cerr << "Height or width set to 0\n";
+    return;
+  }
+
+  // Too many agents
+  if (height * width < agentCount) {
+    cerr << "Too many agents to spawn";
+    return;
+  }
+  
+  // Invalid sugar capacity 
+  if (sugarCapacityMax < sugarCapacityMin) {
+    cerr << "Invalid sugar capacity (Max must be greater or equal to minimum)";
+    return;
+  }
+
+  // Invalid metabolism
+  if (metabolismMax < metabolismMin) {
+    cerr << "Invalid metabolism (Max must be greater or equal to minimum)";
+    return;
+  }
+
+  // Invalid vision
+  if (visionMax < visionMin) {
+    cerr << "Invalid vision (Max must be greater or equal to minimum)";
+    return;
+  }
+
+  // Degenerate simulation errors
+  if (sugarCapacityMax == 0) {
+    cerr << "Degenerate Simulation: No resources possible";
+    return;
+  }
+
+  if (initialWealth == 0) {
+    cerr << "Degenerate Simulation: Guaranteed instant agent death";
+    return;
+  }
+
+  if (agentCount == 0) {
+    cerr << "Degenerate Simulation: No operations possible";
+    return;
+  }
+
+  /* PRE SIMULATION GRID HANDLING */
+  // Initialize sugar capacity randomizer
+  Xoshiro256 sugarCapacityRandom(1);
+  // Create grid
+  vector<vector<GridCell>> grid(height, vector<GridCell>(width));
+  // Fill in the grid cell's values using the randomizer
+  for (int i = 0; i < height; i++) {
+    for (int j = 0; j < width; j++) {
+      grid[i][j].sugarCapacity = grid[i][j].currentSugar = 
+        sugarCapacityRandom.nextInRange(sugarCapacityMin, sugarCapacityMax);
+    }
+  }
+  
+  /* PRE SIMULATION AGENT HANDLING */
+  // Create agent vector
+  vector<Agent> agents(agentCount);
+  // Initialize metabolism randomizer
+  Xoshiro256 metabolismRandom(2);
+  // Initialize vision randomizer
+  Xoshiro256 visionRandom(3);
+  // Initialize wealth randomizer (may be unused)
+  Xoshiro256 wealthRandom(100);
+
+  for (int i = 0; i < agentCount; i++) {
+    // Give each agent their ID while we're at it
+    agents[i].ID = i;
+    int meta;
+    agents[i].metabolism = meta = metabolismRandom.nextInRange(metabolismMin, metabolismMax);
+    agents[i].vision = visionRandom.nextInRange(visionMin, visionMax);
+    agents[i].wealth = (initialWealth == UINT_MAX) ? 
+      wealthRandom.nextInRange(meta * 5, meta * 10) : initialWealth;
+  }
+
+  // To handle coordinates
+  // Initialize coordinate randomizer
+  Xoshiro256 coordinateRandom(4);
+  // Create a temporary vector of all coordinates
+  {
+    vector<pair<int, int>> allCells;
+    allCells.reserve(height * width);
+
+    // Fill the coordinate vector with all possible coordinates
+    for (int i = 0; i < height; i++) {
+      for (int j = 0; j < width; j++) {
+        allCells.push_back({i, j});
+      }
+    }
+
+    // Shuffle the vector with the coordinate randomizer
+    std::shuffle(allCells.begin(), allCells.end(), coordinateRandom);
+    
+    // Assign the first agentCount # of coordinates to the agents in ascending order
+    for (int i = 0; i < agentCount; i++) {
+      agents[i].x = allCells[i].first;
+      agents[i].y = allCells[i].second;
+    }
+  }
+
+
 }
