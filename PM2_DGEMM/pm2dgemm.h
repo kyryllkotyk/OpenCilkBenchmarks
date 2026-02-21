@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <iostream>
+#include <chrono>
 using namespace std;
 
 class PM2_DGEMM
@@ -12,7 +13,7 @@ public:
     @brief Performs tiled matrix multiplication C = A × B.
 
     @param runs How many runs to perform
-    @param A First matrix for multiplication
+    @param A First matrix size for multiplication
     @param B Second matrix for multiplication
     @param blockRowSize Row size of each block (submatrix of C)
     @param blockColSize Column size of each block (submatrix of C)
@@ -21,10 +22,8 @@ public:
     @return Result A x B matrix multiplication. Size Arow x Bcol.
     Returns empty matrix on failure / misinput
     */
-    vector<vector<double>> runBenchmark(const short runs,
-        /*Distributed Info*/int rank,
-        const vector<vector<double>>& A, const vector<vector<double>>& B,
-        const short blockRowSize, const short blockColSize, int baseSeed);
+    vector<vector<double>> runBenchmark(const short runs, int aSize, int bSize, uint64_t baseSeed);
+
 
 private:
     struct Xoshiro256 {
