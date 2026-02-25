@@ -32,7 +32,7 @@ void BailInBailOut::runBenchmarkInAndOut(
     const unsigned short maxInterbankLenderSamplingK,
     unsigned short maxInterbankLoanPercent,
     unsigned short maxFirmLoanPercent,
-    unsigned short firmLenderSampleK,
+    unsigned short firmLenderDegree,
     unsigned short firmRepayPercent,
     unsigned short bankRepayPercent,
 
@@ -53,7 +53,7 @@ void BailInBailOut::runBenchmarkInAndOut(
         wageConsumptionPercent, profitMultiplierMin, profitMultiplierMax,
         shockMultiplierMin, shockMultiplierMax, minInterestRate, maxInterestRate,
         interbankDensity, maxInterbankLenderSamplingK, maxInterbankLoanPercent,
-        maxFirmLoanPercent, firmLenderSampleK, firmRepayPercent,
+        maxFirmLoanPercent, firmLenderDegree, firmRepayPercent,
         bankRepayPercent, bailInCoveragePercent, bailOutCoveragePercent)) {
         return;
     }
@@ -113,7 +113,7 @@ void BailInBailOut::runBenchmarkInAndOut(
             // Firm Arrays
             vector<int64_t> localFirmLiquidity(initialFirmLiquidity);
             vector<uint64_t> localFirmProductionCost(initialProductionCost);
-
+            vector<vector<unsigned int>> localFirmNeighbors(firmCountForRank);
             vector<vector<DebtEntry>> localFirmDebts(firmCountForRank);
 
             // Worker Arrays
@@ -138,13 +138,13 @@ void BailInBailOut::runBenchmarkInAndOut(
             // <!============================================================!>
             // <!===============!Initialize Local Bank Arrays!===============!>
             // <!============================================================!>
-            
+
             for (unsigned int i = 0; i < bankCountForRank; i++) {
                 // Get the global bank ID
                 unsigned int bankGlobalId = bankGlobalStartIndex + i;
 
                 // FInd the seed for this bank's interest rate
-                uint64_t seed = makeSeed(
+                uint64_t bankSeed = makeSeed(
                     baseSeed,
                     run,
                     0,
@@ -152,7 +152,11 @@ void BailInBailOut::runBenchmarkInAndOut(
                     STREAM_INTEREST_RATE_SELECTION
                 );
 
-                localBankInterestRate[i] = percent0to100FromMixedSeed(seed);
+                localBankInterestRate[i] = randomInRangeFromSeed(
+                    bankSeed,
+                    minInterestRate,
+                    maxInterestRate
+                );
             }
 
             // <!===========================================================!>
@@ -164,10 +168,10 @@ void BailInBailOut::runBenchmarkInAndOut(
                 - 1) * interbankDensity) / 100);
 
             // Clamp for safety. Uncomment if graph is exploding too fast
-            // degree = std::min(degree, (unsigned int)maxInterbankLenderSamplingK);
+            // degree = min(degree, (unsigned int)maxInterbankLenderSamplingK);
 
             // Neighbor list for each local bank
-            std::vector<std::vector<unsigned int>>
+            vector<vector<unsigned int>>
                 localBankNeighbors(bankCountForRank);
 
             for (unsigned int localBorrower = 0; localBorrower <
@@ -177,12 +181,13 @@ void BailInBailOut::runBenchmarkInAndOut(
                     + localBorrower;
 
                 // Deterministic per run, policy, borrowerGlobalId
-                uint64_t state = baseSeed;
-                state ^= 0xD6E8FEB86659FD93ULL * (uint64_t)run;
-                state ^= 0xA5A35625D3C1F1B9ULL * (uint64_t)policy;
-                state ^= 0x9E3779B97F4A7C15ULL * (uint64_t)borrowerGlobalId;
-                // Stream tag for graph
-                state ^= STREAM_GRAPH_BUILD;
+                uint64_t state = makeSeed(
+                    baseSeed,
+                    run,
+                    0,
+                    borrowerGlobalId,
+                    STREAM_BANK_GRAPH_BUILD
+                ); 
 
                 // Sample degree # of unique neighbors excluding self
                 localBankNeighbors[localBorrower].clear();
@@ -220,9 +225,28 @@ void BailInBailOut::runBenchmarkInAndOut(
             }
 
             // <!============================================================!>
-            // <!================!Pre-compute Workforce Info!================!>
+            // <!=================!Build Firm -> Bank Graph!=================!>
             // <!============================================================!>
             
+            // Build firm graph 
+            for (unsigned int localFirm = 0; localFirm < firmCountForRank; localFirm++) {
+                unsigned int firmGlobalId = firmGlobalStartIndex + localFirm;
+
+                buildFirmNeighbors(
+                    baseSeed,
+                    (unsigned int)run,
+                    firmGlobalId,
+                    bankCountTotal,
+                    (unsigned int)firmLenderDegree,
+                    STREAM_FIRM_BANK_GRAPH_BUILD,
+                    localFirmNeighbors[localFirm]
+                );
+            }
+
+            // <!============================================================!>
+            // <!================!Pre-compute Workforce Info!================!>
+            // <!============================================================!>
+
             // How much each firm has to pay in total
             vector<uint64_t> localFirmWorkforceCost(firmCountForRank, 0);
 
@@ -235,13 +259,13 @@ void BailInBailOut::runBenchmarkInAndOut(
             // <!============================================================!>
 
             for (int step = 0; step < timesteps; step++) {
-            //......................PHASE A: Firm Updates......................
-                
-                // Firms compute loans before worker deposits are settled,
-                // which may cause them to miss out on a bank they otherwise
-                // could've used as a candidate, modeling short-term 
-                // overreaction to liquidity shocks
+                //......................PHASE A: Firm Updates......................
 
+                    // Firms compute loans before worker deposits are settled,
+                    // which may cause them to miss out on a bank they otherwise
+                    // could've used as a candidate, modeling short-term 
+                    // overreaction to liquidity shocks
+                vector<int64_t> bankIncomingFromFirmRepay(bankCountTotal, 0);
                 for (int f = 0; f < firmCountForRank; f++) {
                     // A.1: Find the random shock value
                     uint64_t shockSeed = makeSeed(
@@ -255,7 +279,7 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                     short shock = randomInRangeFromSeed(
                         shockSeed,
-                        shockMultiplierMin, 
+                        shockMultiplierMin,
                         shockMultiplierMax
                     );
 
@@ -264,7 +288,7 @@ void BailInBailOut::runBenchmarkInAndOut(
                     if (isNegative) {
                         shock *= -1;
                     }
-                        
+
                     // A.2: Affect the production cost using the shock value
 
                     localFirmProductionCost[f] *= (1 + (shock / 100.0));
@@ -281,7 +305,7 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                     short profitMultiplier = randomInRangeFromSeed(
                         profitSeed,
-                        profitMultiplierMin, 
+                        profitMultiplierMin,
                         profitMultiplierMax
                     );
 
@@ -289,118 +313,127 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                     localFirmLiquidity[f] += localFirmProductionCost[f] *
                         (profitMultiplier / 100.0) - localFirmWorkforceCost[f];
-                       
+
                     // A.5: Repay bank loans (firmRepayPercent % of the loan)
 
                     // If liquidity is smaller than the percentage of the loan
                     // -> Pay all of liquidity
-                    
+
                     // If liquidity is negative
                     // -> Don't pay at all
-                    
+
+                    repayFirmLoansProRata(
+                        localFirmLiquidity[f],
+                        localFirmDebts[f],
+                        firmRepayPercent,
+                        bankIncomingFromFirmRepay
+                    );
+
                     // A.6: Request loans if needed
-                    
+
                     // If the liquidity is negative, request a loan
-                    
+
                     // Sample minimum of firmLenderSampleK and degree # of 
                     // candidate banks from the adjacency list
-                    
+
                     // If lender has enough liquidity and lower interest rate 
                     // than the currently best choice, set as the best choice
-                 
+
                     // Save the request in a buffer
+
+
                 }
 
-            //.....................PHASE B: Worker Deposits....................
+                //.....................PHASE B: Worker Deposits....................
 
-                // B.1: Consume part of wage
-                // B.2: Deposit the income (record transaction to buffer)
-                    // Buffer could be an array with index = bank ID
-                    // that holds all the money that it should receive from
-                    // the workers
+                    // B.1: Consume part of wage
+                    // B.2: Deposit the income (record transaction to buffer)
+                        // Buffer could be an array with index = bank ID
+                        // that holds all the money that it should receive from
+                        // the workers
 
-            //...................PHASE C: Send Money to Banks .................
-            
-                // C.1: Send worker money and firm loan repayment deltas to the 
-                // corresponding bank (account for global and local ID conversion)
+                //...................PHASE C: Send Money to Banks .................
 
-                // C.2: Update bank balances
+                    // C.1: Send worker money and firm loan repayment deltas to the 
+                    // corresponding bank (account for global and local ID conversion)
 
-            //......................PHASE D: Request Loans.....................
+                    // C.2: Update bank balances
 
-                // D.1: Send loan request buffers to the banks
+                //......................PHASE D: Request Loans.....................
 
-                // D.2: Banks process loan requests by ID
-                
-                // D.3: Banks update their liquidity to reflect accepted loans
+                    // D.1: Send loan request buffers to the banks
 
-                // D.4: Banks send back acceptances 
-                
-                // D.5: If accepted, firms update liquidity and loan list
-              
-            //...................PHASE E: Bank Updates..................
+                    // D.2: Banks process loan requests by ID
 
-                // E.1: Repay interbank loans (bankRepayPercent % of them)
-                // The repayments are saved in a buffer
-                // The subtraction is applied instantly
-               
-                // E.2: Accrue interest on outstanding loans
-                // Applied by the borrower
-                // Iterate debt lists for firms and banks, and update loan amount
+                    // D.3: Banks update their liquidity to reflect accepted loans
 
-                // E.3: If the bank's liquidity is negative, attempt to 
-                // borrow from another bank (by sending a request message)
-                // Sample up to maxInterbankLenderSamplingK from the adjacency list
-                
-                // Enforce maxInterbankLoanPercent capacity constraint
-                // Send loan requests to candidate lender bank owners
-                // Lender banks process requests deterministically and grant up to capacity
-                // If granted, write a delta for:
-                // Which global bank ID accepted their request
-                // How much this bank owes them
+                    // D.4: Banks send back acceptances 
 
-            //...................PHASE F: Settle Interbank Money.................
+                    // D.5: If accepted, firms update liquidity and loan list
 
-                // F.1: Send interbank repayment deltas (and any loan disbursement deltas)
-                // to the corresponding bank owners
-                
-                // F.2: Bank owners update their liquidity 
-                               
-                // F.3: Clear interbank buffers
+                //...................PHASE E: Bank Updates..................
 
-            //...................PHASE G: Insolvency + Policy..................
+                    // E.1: Repay interbank loans (bankRepayPercent % of them)
+                    // The repayments are saved in a buffer
+                    // The subtraction is applied instantly
 
-                // G.1: Insolvency check for each local bank
-                // Insolvent means bank's liquidity is smaller than the total debt
+                    // E.2: Accrue interest on outstanding loans
+                    // Applied by the borrower
+                    // Iterate debt lists for firms and banks, and update loan amount
 
-                // G.2: If insolvent, apply policy
-                // Policy 0 (Bail-Out):
-                //   Deficit = amount needed to restore solvency
-                //   Injection = Deficit * bailOutCoveragePercent/100.0
-                //
-                // Policy 1 (Bail-In, interbank only):
-                //   Deficit = amount needed
-                //   L = total interbank liabilities (debts)
-                //   haircutRatio = min(1.0, deficit / L)
-                //   haircut fraction = haircutRatio * bailInCoveragePercent/100.0
-                //   Each interbank loan owed by this bank gets lowered by the
-                //   haircut fraction (multiplicatively)
+                    // E.3: If the bank's liquidity is negative, attempt to 
+                    // borrow from another bank (by sending a request message)
+                    // Sample up to maxInterbankLenderSamplingK from the adjacency list
 
-                // G.3: Track bail
-                // For both policies, track how much bail was granted this step
-                
-                // G.4: Update total bail money
-                // After the bail money for this timestep is finalized,
-                // update the total tracker
-                
-                // G.5: Grace money for failure
-                // If the coverege is not 100%, the bank might fail
-                // Find the remaining deficit after policy application
-                // Add the deficit to the grace money tracker for this timestep
-                
-                // G.6: Update total grace money
-                // After all banks have been rescued, add the grace money
-                // used this time step to the total grace money tracker
+                    // Enforce maxInterbankLoanPercent capacity constraint
+                    // Send loan requests to candidate lender bank owners
+                    // Lender banks process requests deterministically and grant up to capacity
+                    // If granted, write a delta for:
+                    // Which global bank ID accepted their request
+                    // How much this bank owes them
+
+                //...................PHASE F: Settle Interbank Money.................
+
+                    // F.1: Send interbank repayment deltas (and any loan disbursement deltas)
+                    // to the corresponding bank owners
+
+                    // F.2: Bank owners update their liquidity 
+
+                    // F.3: Clear interbank buffers
+
+                //...................PHASE G: Insolvency + Policy..................
+
+                    // G.1: Insolvency check for each local bank
+                    // Insolvent means bank's liquidity is smaller than the total debt
+
+                    // G.2: If insolvent, apply policy
+                    // Policy 0 (Bail-Out):
+                    //   Deficit = amount needed to restore solvency
+                    //   Injection = Deficit * bailOutCoveragePercent/100.0
+                    //
+                    // Policy 1 (Bail-In, interbank only):
+                    //   Deficit = amount needed
+                    //   L = total interbank liabilities (debts)
+                    //   haircutRatio = min(1.0, deficit / L)
+                    //   haircut fraction = haircutRatio * bailInCoveragePercent/100.0
+                    //   Each interbank loan owed by this bank gets lowered by the
+                    //   haircut fraction (multiplicatively)
+
+                    // G.3: Track bail
+                    // For both policies, track how much bail was granted this step
+
+                    // G.4: Update total bail money
+                    // After the bail money for this timestep is finalized,
+                    // update the total tracker
+
+                    // G.5: Grace money for failure
+                    // If the coverege is not 100%, the bank might fail
+                    // Find the remaining deficit after policy application
+                    // Add the deficit to the grace money tracker for this timestep
+
+                    // G.6: Update total grace money
+                    // After all banks have been rescued, add the grace money
+                    // used this time step to the total grace money tracker
 
             }
         }
@@ -440,7 +473,7 @@ bool BailInBailOut::errorDetectionAndClamping(
     const unsigned short maxInterbankLenderSamplingK,
     unsigned short& maxInterbankLoanPercent,
     unsigned short& maxFirmLoanPercent,
-    unsigned short& firmLenderSampleK,
+    unsigned short& firmLenderDegree,
     unsigned short& firmRepayPercent,
     unsigned short& bankRepayPercent,
 
@@ -548,7 +581,7 @@ bool BailInBailOut::errorDetectionAndClamping(
         return false;
     }
 
-    if (firmLenderSampleK < 1) {
+    if (firmLenderDegree < 1) {
         cerr << "firmLenderSampleK variable out of bounds (Must be at least 1)";
         return false;
     }
@@ -711,7 +744,7 @@ inline uint64_t BailInBailOut::makeSeed(
     return splitmix64Hash(key);
 }
 
-inline unsigned short percent0to100FromMixedSeed(uint64_t seed) {
+inline unsigned short BailInBailOut::percent0to100FromMixedSeed(uint64_t seed) {
     // Assumes seed is already mixed
     uint64_t x = seed;
 
@@ -739,8 +772,8 @@ inline uint64_t BailInBailOut::randomInRangeFromSeed(uint64_t seed, uint64_t min
     uint64_t limit = UINT64_MAX - (UINT64_MAX % range);
 
     // Keep going until retry
-    while(x >= limit) {
-        x += 0x9e3779b97f4a7c15ULL;  
+    while (x >= limit) {
+        x += 0x9e3779b97f4a7c15ULL;
     }
 
     return minVal + (x % range);
@@ -754,9 +787,9 @@ inline uint64_t BailInBailOut::percentFloorU64(uint64_t x, unsigned short pct) {
 // Writes lender receipts into bankIncomingFromFirmRepay for its global index
 inline void BailInBailOut::repayFirmLoansProRata(
     int64_t& firmLiquidity,
-    std::vector<DebtEntry>& debts,
+    vector<DebtEntry>& debts,
     unsigned short firmRepayPercent,
-    std::vector<int64_t>& bankIncomingFromFirmRepay
+    vector<int64_t>& bankIncomingFromFirmRepay
 ) {
     // Return if not enough liquidity, no debts, or simulation set to not repay
     if (firmLiquidity <= 0 || debts.empty() || firmRepayPercent == 0) {
@@ -765,7 +798,7 @@ inline void BailInBailOut::repayFirmLoansProRata(
 
     // How many debts are owed
     const size_t n = debts.size();
-    std::vector<uint64_t> scheduled(n, 0);
+    vector<uint64_t> scheduled(n, 0);
 
     uint64_t scheduledTotal = 0;
 
@@ -789,17 +822,17 @@ inline void BailInBailOut::repayFirmLoansProRata(
     }
 
     // Maximum money the firm can use to pay
-    uint64_t canPay = (uint64_t)firmLiquidity; 
+    uint64_t canPay = (uint64_t)firmLiquidity;
     // How much they are allowed to pay total
     uint64_t payTotal = (scheduledTotal <= canPay) ? scheduledTotal : canPay;
-    
+
     if (payTotal == 0) {
         return;
     }
 
 
-    std::vector<uint64_t> paymentReceived(n, 0);
-    std::vector<uint64_t> proportionalRemainder(n, 0);
+    vector<uint64_t> paymentReceived(n, 0);
+    vector<uint64_t> proportionalRemainder(n, 0);
 
     // Tracker of how much got assigned so far
     uint64_t sumPay = 0;
@@ -812,7 +845,7 @@ inline void BailInBailOut::repayFirmLoansProRata(
         unsigned __int128 scaledNumerator = (unsigned __int128)payTotal
             * (unsigned __int128)scheduled[i];
         uint64_t paymentAmount = (uint64_t)(scaledNumerator / scheduledTotal);
-        uint64_t proportionalRemain = (uint64_t)(scaledNumerator % 
+        uint64_t proportionalRemain = (uint64_t)(scaledNumerator %
             scheduledTotal);
 
         // Safety cap
@@ -828,7 +861,7 @@ inline void BailInBailOut::repayFirmLoansProRata(
     // Distribute leftover 1 by 1 by largest remainder 
     uint64_t leftover = payTotal - sumPay;
     if (leftover > 0) {
-        std::vector<size_t> order;
+        vector<size_t> order;
         order.reserve(n);
 
         for (size_t i = 0; i < n; i++) {
@@ -840,12 +873,15 @@ inline void BailInBailOut::repayFirmLoansProRata(
             }
         }
 
-        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-            if (proportionalRemainder[a] != proportionalRemainder[b]) return proportionalRemainder[a] > proportionalRemainder[b];
-            if (debts[a].lenderBankGlobalId != debts[b].lenderBankGlobalId)
+        sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            if (proportionalRemainder[a] != proportionalRemainder[b]) {
+                return proportionalRemainder[a] > proportionalRemainder[b];
+            }
+            if (debts[a].lenderBankGlobalId != debts[b].lenderBankGlobalId) {
                 return debts[a].lenderBankGlobalId < debts[b].lenderBankGlobalId;
+            }
             return a < b;
-            });
+        });
 
         for (size_t k = 0; k < order.size() && leftover > 0; k++) {
             size_t i = order[k];
@@ -860,7 +896,9 @@ inline void BailInBailOut::repayFirmLoansProRata(
     uint64_t actuallyPaid = 0;
     for (size_t i = 0; i < n; i++) {
         uint64_t p = paymentReceived[i];
-        if (p == 0) continue;
+        if (p == 0) {
+            continue;
+        }
 
         debts[i].amount -= p;
         bankIncomingFromFirmRepay[debts[i].lenderBankGlobalId] += (int64_t)p;
@@ -869,7 +907,7 @@ inline void BailInBailOut::repayFirmLoansProRata(
 
     firmLiquidity -= (int64_t)actuallyPaid;
 
-    // Cleanup paid-off debts (swap-pop)
+    // Cleanup paid debts
     for (size_t i = 0; i < debts.size(); ) {
         if (debts[i].amount == 0) {
             debts[i] = debts.back();
@@ -880,3 +918,76 @@ inline void BailInBailOut::repayFirmLoansProRata(
         }
     }
 }
+
+inline void BailInBailOut::buildFirmNeighbors(
+    uint64_t baseSeed,
+    unsigned int run,
+    unsigned int firmGlobalId,
+    unsigned int bankCountTotal,
+    unsigned int firmLenderDegree,
+    uint64_t stream,
+    vector<unsigned int>& outNeighbors
+) {
+    outNeighbors.clear();
+
+    if (bankCountTotal == 0 || firmLenderDegree == 0) {
+        return;
+    }
+
+    // Degree can't go above bankCountTotal
+    unsigned int degree = std::min(firmLenderDegree, bankCountTotal);
+
+    // Get the seed
+    uint64_t seedy = makeSeed(
+        baseSeed,
+        run,
+        0,
+        firmGlobalId,
+        stream
+    );
+
+    outNeighbors.reserve(degree);
+
+    while (outNeighbors.size() < degree) {
+        seedy = splitmix64Hash(seedy);
+
+        unsigned int candidate = (unsigned int)(seedy % bankCountTotal);
+
+        // Enforce uniqueness
+        bool already = false;
+        for (unsigned int x : outNeighbors) {
+            if (x == candidate) {
+                already = true;
+                break;
+            }
+        }
+        if (!already) {
+            outNeighbors.push_back(candidate);
+        }
+    }
+}
+
+inline unsigned int BailInBailOut::bankOwnerRankFromGlobalId(
+    unsigned int bankCountTotal,
+    unsigned int totalRanks,
+    unsigned int bankGlobalId
+) {
+
+    // Inverse mapping (global ID to owning rank, matches computeRange splitting)
+
+
+    unsigned int base = bankCountTotal / totalRanks;
+    unsigned int remainder = bankCountTotal % totalRanks;
+
+    // Give +1 remainder to the first ranks until no remainder is left
+
+    unsigned int cutoff = (base + 1) * remainder; 
+
+    if (bankGlobalId < cutoff) {
+        return bankGlobalId / (base + 1);
+    }
+    else {
+        return remainder + (bankGlobalId - cutoff) / base;
+    }
+}
+
