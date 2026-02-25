@@ -790,48 +790,58 @@ inline void BailInBailOut::repayFirmLoansProRata(
 
     // Maximum money the firm can use to pay
     uint64_t canPay = (uint64_t)firmLiquidity; 
-    // How much they can pay total
+    // How much they are allowed to pay total
     uint64_t payTotal = (scheduledTotal <= canPay) ? scheduledTotal : canPay;
     
     if (payTotal == 0) {
         return;
     }
 
-    std::vector<uint64_t> pay(n, 0);
-    std::vector<uint64_t> rem(n, 0);
 
+    std::vector<uint64_t> paymentReceived(n, 0);
+    std::vector<uint64_t> proportionalRemainder(n, 0);
+
+    // Tracker of how much got assigned so far
     uint64_t sumPay = 0;
     for (size_t i = 0; i < n; i++) {
         if (scheduled[i] == 0) {
             continue;
         }
 
-        // pay_i = floor(payTotal * scheduled_i / scheduledTotal)
-        unsigned __int128 num = (unsigned __int128)payTotal * (unsigned __int128)scheduled[i];
-        uint64_t qi = (uint64_t)(num / scheduledTotal);
-        uint64_t ri = (uint64_t)(num % scheduledTotal);
+        // Payment is the floor of (payTotal * scheduled / scheduledTotal)
+        unsigned __int128 scaledNumerator = (unsigned __int128)payTotal
+            * (unsigned __int128)scheduled[i];
+        uint64_t paymentAmount = (uint64_t)(scaledNumerator / scheduledTotal);
+        uint64_t proportionalRemain = (uint64_t)(scaledNumerator % 
+            scheduledTotal);
 
-        // safety caps
-        if (qi > debts[i].amount) qi = debts[i].amount;
+        // Safety cap
+        if (paymentAmount > debts[i].amount) {
+            paymentAmount = debts[i].amount;
+        }
 
-        pay[i] = qi;
-        rem[i] = ri;
-        sumPay += qi;
+        paymentReceived[i] = paymentAmount;
+        proportionalRemainder[i] = proportionalRemain;
+        sumPay += paymentAmount;
     }
 
-    // Distribute leftover 1-by-1 by largest remainder (deterministic tiebreak)
+    // Distribute leftover 1 by 1 by largest remainder 
     uint64_t leftover = payTotal - sumPay;
     if (leftover > 0) {
         std::vector<size_t> order;
         order.reserve(n);
 
         for (size_t i = 0; i < n; i++) {
-            if (scheduled[i] == 0) continue;
-            if (debts[i].amount > pay[i]) order.push_back(i);
+            if (scheduled[i] == 0) {
+                continue;
+            }
+            if (debts[i].amount > paymentReceived[i]) {
+                order.push_back(i);
+            }
         }
 
         std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-            if (rem[a] != rem[b]) return rem[a] > rem[b];
+            if (proportionalRemainder[a] != proportionalRemainder[b]) return proportionalRemainder[a] > proportionalRemainder[b];
             if (debts[a].lenderBankGlobalId != debts[b].lenderBankGlobalId)
                 return debts[a].lenderBankGlobalId < debts[b].lenderBankGlobalId;
             return a < b;
@@ -839,8 +849,8 @@ inline void BailInBailOut::repayFirmLoansProRata(
 
         for (size_t k = 0; k < order.size() && leftover > 0; k++) {
             size_t i = order[k];
-            if (debts[i].amount > pay[i]) {
-                pay[i] += 1;
+            if (debts[i].amount > paymentReceived[i]) {
+                paymentReceived[i] += 1;
                 leftover -= 1;
             }
         }
@@ -849,7 +859,7 @@ inline void BailInBailOut::repayFirmLoansProRata(
     // Apply payments
     uint64_t actuallyPaid = 0;
     for (size_t i = 0; i < n; i++) {
-        uint64_t p = pay[i];
+        uint64_t p = paymentReceived[i];
         if (p == 0) continue;
 
         debts[i].amount -= p;
