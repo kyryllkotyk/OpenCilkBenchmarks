@@ -4,14 +4,17 @@
 
 #include <iostream>
 #include <vector>
+#include <algorithm>
+
 using namespace std;
 
-#define STREAM_GRAPH_BUILD 1ULL
+#define STREAM_BANK_GRAPH_BUILD 1ULL
 #define STREAM_WORKER_BANK_ASSIGN  2ULL
 #define STREAM_WORKER_FIRM_ASSIGN  3ULL
 #define STREAM_INTEREST_RATE_SELECTION 4ULL
 #define STREAM_SHOCK_GENERATION 5ULL
 #define STREAM_PROFIT_MULTIPLIER_GENERATION 6ULL
+#define STREAM_FIRM_BANK_GRAPH_BUILD 7ULL
 class BailInBailOut
 {
 public:
@@ -48,7 +51,7 @@ public:
         // Maximum percentage of the bank's liquidity it can offer as a loan
         unsigned short maxInterbankLoanPercent,
         unsigned short maxFirmLoanPercent,
-        unsigned short firmLenderSampleK,
+        unsigned short firmLenderDegree,
         unsigned short firmRepayPercent,
         unsigned short bankRepayPercent,
 
@@ -62,10 +65,18 @@ public:
 private:
     struct DebtEntry {
         // Global bank ID
-        unsigned int lenderBankGlobalId; 
+        unsigned int lenderBankGlobalId;
         // How much is owed
         uint64_t amount;
     };
+
+    struct FirmLoanRequest {
+        unsigned int firmGlobalId;
+        unsigned int lenderBankGlobalId;
+        uint64_t amountRequested;
+        unsigned short lenderInterestRate;
+    };
+
     // Clamps fractions and checks for faulty parameters
     bool errorDetectionAndClamping(
         const unsigned int runs,
@@ -94,7 +105,7 @@ private:
         const unsigned short maxInterbankLenderSamplingK,
         unsigned short& maxInterbankLoanPercent,
         unsigned short& maxFirmLoanPercent,
-        unsigned short& firmLenderSampleK,
+        unsigned short& firmLenderDegree,
         unsigned short& firmRepayPercent,
         unsigned short& bankRepayPercent,
 
@@ -141,9 +152,13 @@ private:
         uint64_t streamTag
     );
 
+    unsigned short percent0to100FromMixedSeed(
+        uint64_t seed
+    );
+
     uint64_t randomInRangeFromSeed(
         uint64_t seed,
-        uint64_t minVal, 
+        uint64_t minVal,
         uint64_t maxVal);
 
     uint64_t percentFloorU64(
@@ -152,10 +167,25 @@ private:
     );
 
     void repayFirmLoansProRata(
-        int64_t& firmLiquidity, 
-        vector<DebtEntry>& debts, 
+        int64_t& firmLiquidity,
+        vector<DebtEntry>& debts,
         unsigned short firmRepayPercent,
         vector<int64_t>& bankIncomingFromFirmRepay
+    );
+
+    void buildFirmNeighbors(
+        uint64_t baseSeed, 
+        unsigned int run,
+        unsigned int firmGlobalId, 
+        unsigned int bankCountTotal, 
+        unsigned int firmLenderDegree,
+        uint64_t stream,
+        vector<unsigned int>& outNeighbors);
+
+    unsigned int bankOwnerRankFromGlobalId(
+        unsigned int bankCountTotal,
+        unsigned int totalRanks,
+        unsigned int bankGlobalId
     );
 };
 
