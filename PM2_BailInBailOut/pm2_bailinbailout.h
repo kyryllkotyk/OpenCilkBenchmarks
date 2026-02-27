@@ -143,12 +143,17 @@ private:
         double nextInRangeDouble(double min, double max);
     };
 
+    struct e1InterbankRepaymentMessage {
+        unsigned int lenderBankGlobalId;
+        uint64_t amount;
+    };
+
     //<-----!!!!!!!!!!!!!!!!!!!!!!!!MPI DATATYPES!!!!!!!!!!!!!!!!!!!!!!!!----->
     MPI_Datatype a0MakeFirmWorkforceDeltaType();
     MPI_Datatype d1MakeFirmLoanRequestType();
     MPI_Datatype d4MakeFirmLoanAcceptanceType();
     MPI_Datatype c1MakeBankDeltaMessageType();
-
+    MPI_Datatype e1MakeInterbankRepaymentType();
 
     //TODO:: ORGANIZE BY FILE & PHASE
     // 
@@ -285,15 +290,23 @@ private:
         unsigned int globalId
     );
 
+    unsigned int getInterestRate(
+        uint64_t baseSeed, 
+        unsigned int run,
+        unsigned int globalId, 
+        uint64_t minVal,
+        uint64_t maxVal
+    );
+
     void a0ComputeFirmWorkforceCost(
         unsigned int firmCountTotal,
         unsigned int mpiRank,
         unsigned int mpiSize,
         unsigned int firmGlobalStartIndex,
         unsigned int firmCountForRank,
-        const std::vector<unsigned short>& localWorkerFirmID,
+        const vector<unsigned short>& localWorkerFirmID,
         unsigned int wage,
-        std::vector<uint64_t>& localFirmWorkforceCost
+        vector<uint64_t>& localFirmWorkforceCost
     );
 
     void a6RequestFirmLoans(
@@ -353,6 +366,18 @@ private:
         vector<vector<DebtEntry>>& localFirmDebts, 
         vector<d2FirmLoanAcceptance>& receivedAcceptances
     );
+
+    void e1RepayInterbankLoans(
+        unsigned int bankCountTotal, 
+        unsigned int mpiRank,
+        unsigned int mpiSize, 
+        unsigned int bankGlobalStartIndex, 
+        unsigned int bankCountForRank,
+        unsigned short bankRepayPercent,
+        vector<int64_t>& localBankLiquidity,
+        vector<vector<DebtEntry>>& localBankDebts
+    );
+
 
     // Exchange all helper
     template<typename T>

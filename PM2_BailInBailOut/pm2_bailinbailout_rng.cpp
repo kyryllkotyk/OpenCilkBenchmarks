@@ -171,7 +171,7 @@ uint64_t BailInBailOut::randomInRangeFromSeed(
     // Assumes mixed seed
 
     if (minVal > maxVal) {
-        std::swap(minVal, maxVal);
+        swap(minVal, maxVal);
     }
 
     uint64_t range = maxVal - minVal + 1;

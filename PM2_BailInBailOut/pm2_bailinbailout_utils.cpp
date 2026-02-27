@@ -245,3 +245,24 @@ unsigned int BailInBailOut::ownerRankFromGlobalId(
     }
 }
 
+unsigned int BailInBailOut::getInterestRate(
+    uint64_t baseSeed,
+    unsigned int run,
+    unsigned int globalId,
+    uint64_t minVal,
+    uint64_t maxVal
+) {
+    uint64_t seed = makeSeed(
+        baseSeed,
+        run,
+        0,
+        globalId,
+        STREAM_INTEREST_RATE_SELECTION
+    );
+
+    // Rebuild interest rates from seed to avoid MPI calls
+    unsigned short rate = (unsigned short)randomInRangeFromSeed
+    (seed, minVal, maxVal);
+
+    return rate;
+}

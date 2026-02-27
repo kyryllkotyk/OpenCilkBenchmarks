@@ -121,10 +121,7 @@ void BailInBailOut::runBenchmarkInAndOut(
 
             // Bank Arrays
             vector<int64_t> localBankLiquidity(bankCountForRank,
-                initialBankLiquidity),
-                localBankDebt(bankCountForRank, 0);
-            vector<vector<unsigned int>> localBankDebtsOwedToBankID(
-                bankCountForRank, vector<unsigned int>());
+                initialBankLiquidity);
             vector<unsigned short> localBankInterestRate(bankCountForRank);
             vector<int64_t> wageDepositBuffer(bankCountTotal);
             vector<FirmLoanRequest> receivedLoanRequests(0);
@@ -132,6 +129,7 @@ void BailInBailOut::runBenchmarkInAndOut(
             vector<vector<d2FirmLoanAcceptance>> firmLoanAcceptancesToRank(mpiSize);
             vector<uint64_t> bankFirmLoanOutflow(bankCountForRank);
             vector<d2FirmLoanAcceptance> receivedAcceptances;
+            vector<vector<DebtEntry>> eLocalBankDebts;
 
             // Firm Arrays
             vector<int64_t> localFirmLiquidity(firmCountForRank, 
@@ -300,10 +298,10 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                 //......................PHASE A: Firm Updates......................
 
-                    // Firms compute loans before worker deposits are settled,
-                    // which may cause them to miss out on a bank they otherwise
-                    // could've used as a candidate, modeling short-term 
-                    // overreaction to liquidity shocks
+                // Firms compute loans before worker deposits are settled,
+                // which may cause them to miss out on a bank they otherwise
+                // could've used as a candidate, modeling short-term 
+                // overreaction to liquidity shocks
                 vector<int64_t> bankIncomingFromFirmRepay(bankCountTotal, 0);
                 for (int f = 0; f < firmCountForRank; f++) {
                     // A.1: Find the random shock value
@@ -535,24 +533,35 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                 //...................PHASE E: Bank Updates..................
 
-                    // E.1: Repay interbank loans (bankRepayPercent % of them)
-                    // The repayments are saved in a buffer
-                    // The subtraction is applied instantly
+                // E.1: Repay interbank loans (bankRepayPercent % of them)
+                // The repayments are saved in a buffer
+                // The subtraction is applied instantly
+                
+                e1RepayInterbankLoans(
+                    bankCountTotal,
+                    mpiRank,
+                    mpiSize,
+                    bankGlobalStartIndex,
+                    bankCountForRank,
+                    bankRepayPercent,
+                    localBankLiquidity,
+                    eLocalBankDebts
+                );
+                
+                // E.2: Accrue interest on outstanding loans
+                // Applied by the borrower
+                // Iterate debt lists for firms and banks, and update loan amount
+                
+                // E.3: If the bank's liquidity is negative, attempt to 
+                // borrow from another bank (by sending a request message)
+                // Sample up to maxInterbankLenderSamplingK from the adjacency list
 
-                    // E.2: Accrue interest on outstanding loans
-                    // Applied by the borrower
-                    // Iterate debt lists for firms and banks, and update loan amount
-
-                    // E.3: If the bank's liquidity is negative, attempt to 
-                    // borrow from another bank (by sending a request message)
-                    // Sample up to maxInterbankLenderSamplingK from the adjacency list
-
-                    // Enforce maxInterbankLoanPercent capacity constraint
-                    // Send loan requests to candidate lender bank owners
-                    // Lender banks process requests deterministically and grant up to capacity
-                    // If granted, write a delta for:
-                    // Which global bank ID accepted their request
-                    // How much this bank owes them
+                // Enforce maxInterbankLoanPercent capacity constraint
+                // Send loan requests to candidate lender bank owners
+                // Lender banks process requests deterministically and grant up to capacity
+                // If granted, write a delta for:
+                // Which global bank ID accepted their request
+                // How much this bank owes them
 
                 //...................PHASE F: Settle Interbank Money.................
 
@@ -765,28 +774,28 @@ void BailInBailOut::ASSERT_AND_LOG_D(
 
         printf("BankGID=%u pre=%lld cap=%llu outflow=%llu after=%lld expectedAfter=%lld\n",
             bankGlobalId,
-            (long long)bankLiquidityBeforeD3[b],
-            (unsigned long long)cap,
-            (unsigned long long)bankFirmLoanOutflow[b],
-            (long long)actualAfter,
-            (long long)expectedAfter
+            (int64_t)bankLiquidityBeforeD3[b],
+            (uint64_t)cap,
+            (uint64_t)bankFirmLoanOutflow[b],
+            (int64_t)actualAfter,
+            (int64_t)expectedAfter
         );
 
         // Assertions with prints
         if (bankFirmLoanOutflow[b] > cap) {
             printf("[Rank %u] FAIL: BankGID=%u outflow=%llu > cap=%llu\n",
                 mpiRank, bankGlobalId,
-                (unsigned long long)bankFirmLoanOutflow[b],
-                (unsigned long long)cap
+                (uint64_t)bankFirmLoanOutflow[b],
+                (uint64_t)cap
             );
         }
         if (actualAfter != expectedAfter) {
             printf("[Rank %u] FAIL: BankGID=%u liquidityAfter=%lld != expected=%lld\n",
-                mpiRank, bankGlobalId, (long long)actualAfter, (long long)expectedAfter);
+                mpiRank, bankGlobalId, (int64_t)actualAfter, (int64_t)expectedAfter);
         }
         if (actualAfter < 0) {
             printf("[Rank %u] WARN: BankGID=%u liquidity negative after D3 (%lld)\n",
-                mpiRank, bankGlobalId, (long long)actualAfter);
+                mpiRank, bankGlobalId, (int64_t)actualAfter);
         }
     }
 
@@ -811,22 +820,22 @@ void BailInBailOut::ASSERT_AND_LOG_D(
 
         printf("FirmGID=%u pre=%lld cashReceived=%lld newDebtCount=%u newDebtSum=%llu post=%lld\n",
             firmGlobalId,
-            (long long)pre,
-            (long long)deltaCash,
+            (int64_t)pre,
+            (int64_t)deltaCash,
             (unsigned int)(afterCount - beforeCount),
-            (unsigned long long)sumNewDebt,
-            (long long)post
+            (uint64_t)sumNewDebt,
+            (int64_t)post
         );
 
         if (deltaCash < 0) {
             printf("[Rank %u] FAIL: FirmGID=%u cashReceived negative (%lld)\n",
-                mpiRank, firmGlobalId, (long long)deltaCash);
+                mpiRank, firmGlobalId, (int64_t)deltaCash);
         }
         if (sumNewDebt != (uint64_t)((deltaCash > 0) ? deltaCash : 0)) {
             printf("[Rank %u] FAIL: FirmGID=%u newDebtSum=%llu != cashReceived=%lld\n",
                 mpiRank, firmGlobalId,
-                (unsigned long long)sumNewDebt,
-                (long long)deltaCash
+                (uint64_t)sumNewDebt,
+                (int64_t)deltaCash
             );
         }
         // lenderBankGlobalId range checks for newly added debts
@@ -849,7 +858,7 @@ void BailInBailOut::ASSERT_AND_LOG_D(
             printf("Grant: firmGID=%u bankGID=%u amount=%llu\n",
                 e.firmGlobalId,
                 e.lenderBankGlobalId,
-                (unsigned long long)e.amountGranted
+                (uint64_t)e.amountGranted
             );
         }
     }

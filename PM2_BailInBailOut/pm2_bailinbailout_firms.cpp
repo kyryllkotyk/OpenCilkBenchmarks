@@ -33,7 +33,7 @@ void BailInBailOut::buildFirmNeighbors(
     }
 
     // Degree can't go above bankCountTotal
-    unsigned int degree = std::min(firmLenderDegree, bankCountTotal);
+    unsigned int degree = min(firmLenderDegree, bankCountTotal);
 
     // Get the seed
     uint64_t seedy = makeSeed(
@@ -223,9 +223,9 @@ void BailInBailOut::a0ComputeFirmWorkforceCost(
     unsigned int mpiSize,
     unsigned int firmGlobalStartIndex,
     unsigned int firmCountForRank,
-    const std::vector<unsigned short>& localWorkerFirmID,
+    const vector<unsigned short>& localWorkerFirmID,
     unsigned int wage,
-    std::vector<uint64_t>& localFirmWorkforceCost
+    vector<uint64_t>& localFirmWorkforceCost
 ) {
     (void)mpiRank;
 
@@ -234,7 +234,7 @@ void BailInBailOut::a0ComputeFirmWorkforceCost(
 
     // Aggregate locally first so we don't have to send a message for
     // every single worker individually
-    std::unordered_map<unsigned int, uint64_t> localAggregator;
+    unordered_map<unsigned int, uint64_t> localAggregator;
     localAggregator.reserve(localWorkerFirmID.size());
 
     for (unsigned int i = 0; i < localWorkerFirmID.size(); i++) {
@@ -242,7 +242,7 @@ void BailInBailOut::a0ComputeFirmWorkforceCost(
         localAggregator[firmGlobalId] += (uint64_t)wage;
     }
 
-    std::vector<std::vector<a0FirmWorkforceDeltaMessage>> toRank(mpiSize);
+    vector<vector<a0FirmWorkforceDeltaMessage>> toRank(mpiSize);
 
     for (auto& keyValue : localAggregator) {
         unsigned int firmGlobalId = keyValue.first;
@@ -266,7 +266,7 @@ void BailInBailOut::a0ComputeFirmWorkforceCost(
 
     static MPI_Datatype msgType = a0MakeFirmWorkforceDeltaType();
 
-    std::vector<a0FirmWorkforceDeltaMessage> received;
+    vector<a0FirmWorkforceDeltaMessage> received;
     allToAllvExchange<a0FirmWorkforceDeltaMessage>(
         mpiSize,
         toRank,
@@ -324,16 +324,14 @@ void BailInBailOut::a6RequestFirmLoans(
         // Start with first bank to guarantee some value
         unsigned int bestBankGlobalId = candidates[0];
 
-        uint64_t seed = makeSeed(
+        // Rebuild interest rates from seed to avoid MPI calls
+        unsigned short bestRate = getInterestRate(
             baseSeed,
             run,
-            0,
             bestBankGlobalId,
-            STREAM_INTEREST_RATE_SELECTION
+            minInterestRate,
+            maxInterestRate
         );
-
-        unsigned short bestRate = (unsigned short)randomInRangeFromSeed
-        (seed, minInterestRate, maxInterestRate);
 
         for (unsigned int i = 1; i < candidates.size(); i++) {
             unsigned int bankGlobalId = candidates[i];
