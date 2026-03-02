@@ -26,12 +26,15 @@ void BailInBailOut::runBenchmarkInAndOut(
     const unsigned int bankCountTotal,
     const unsigned int firmCountTotal,
     const unsigned int workerCountTotal,
+    // How many workers each bank has
+    const unsigned int bankWorkerCount,
 
     /* System Parameters */
     const unsigned int initialBankLiquidity,
     const unsigned int initialFirmLiquidity,
     const unsigned int initialProductionCost,
     const unsigned int wage,
+    const unsigned int bankEmployeeWage,
 
     /* Multipliers (in %, 95 = 0.95 multiplier) */
     unsigned short wageConsumptionPercent,
@@ -45,6 +48,7 @@ void BailInBailOut::runBenchmarkInAndOut(
     /* Banking Interaction Parameters */
     unsigned short interbankDensity,
     const unsigned short maxInterbankLenderSamplingK,
+    // Maximum percentage of the bank's liquidity it can offer as a loan
     unsigned short maxInterbankLoanPercent,
     unsigned short maxFirmLoanPercent,
     unsigned short firmLenderDegree,
@@ -81,6 +85,15 @@ void BailInBailOut::runBenchmarkInAndOut(
 
     int mpiRank;
     MPI_Comm_rank(MPI_COMM_WORLD, &mpiRank);
+
+    /*if (mpiRank == 0) {
+        printf("sizeof(e3InterbankLoanAcceptance) = %zu\n", sizeof(e3InterbankLoanAcceptance));
+        printf("sizeof(e3InterbankLoanRequest)    = %zu\n", sizeof(e3InterbankLoanRequest));
+        printf("sizeof(e1InterbankRepaymentMessage) = %zu\n", sizeof(e1InterbankRepaymentMessage));
+        printf("sizeof(e3NeighborLiquidityMessage) = %zu\n", sizeof(e3NeighborLiquidityMessage));
+        printf("sizeof(FirmLoanRequest) = %zu\n", sizeof(FirmLoanRequest));
+        printf("sizeof(d2FirmLoanAcceptance) = %zu\n", sizeof(d2FirmLoanAcceptance));
+    }*/
 
     int mpiSize;
     MPI_Comm_size(MPI_COMM_WORLD, &mpiSize);
@@ -129,7 +142,7 @@ void BailInBailOut::runBenchmarkInAndOut(
             vector<vector<d2FirmLoanAcceptance>> firmLoanAcceptancesToRank(mpiSize);
             vector<uint64_t> bankFirmLoanOutflow(bankCountForRank);
             vector<d2FirmLoanAcceptance> receivedAcceptances;
-            vector<vector<DebtEntry>> eLocalBankDebts;
+            vector<vector<DebtEntry>> eLocalBankDebts(bankCountForRank);
 
             // Firm Arrays
             vector<int64_t> localFirmLiquidity(firmCountForRank, 
@@ -168,7 +181,7 @@ void BailInBailOut::runBenchmarkInAndOut(
                 // Get the global bank ID
                 unsigned int bankGlobalId = bankGlobalStartIndex + i;
 
-                // FInd the seed for this bank's interest rate
+                // Find the seed for this bank's interest rate
                 uint64_t bankSeed = makeSeed(
                     baseSeed,
                     run,
@@ -294,9 +307,9 @@ void BailInBailOut::runBenchmarkInAndOut(
             vector<DDebugGrantEdge> grantsThisStep;
 
             for (int step = 0; step < timesteps; step++) {
-                grantsThisStep.clear();
+                //grantsThisStep.clear();
 
-                //......................PHASE A: Firm Updates......................
+                //..............PHASE A: Firms and Worker Updates..............
 
                 // Firms compute loans before worker deposits are settled,
                 // which may cause them to miss out on a bank they otherwise
@@ -312,7 +325,6 @@ void BailInBailOut::runBenchmarkInAndOut(
                         f + firmGlobalStartIndex,
                         STREAM_SHOCK_GENERATION
                     );
-
 
                     short shock = randomInRangeFromSeed(
                         shockSeed,
@@ -350,7 +362,7 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                     localFirmLiquidity[f] += localFirmProductionCost[f] *
                         (profitMultiplier / 100.0) - localFirmWorkforceCost[f];
-
+                    
                     // A.5: Repay bank loans (firmRepayPercent % of the loan)
 
                         // If liquidity is smaller than the percentage of the loan
@@ -365,6 +377,16 @@ void BailInBailOut::runBenchmarkInAndOut(
                         firmRepayPercent,
                         bankIncomingFromFirmRepay
                     );
+                }
+
+                // A.5.5: Bank pays employees their wage.
+                // They keep a percentage of it in their bank accounts
+                // A bank employee deposits into the bank they work for
+                for (int bankID = 0; bankID < bankCountForRank; bankID++) {
+                    localBankLiquidity[bankID] -= 
+                        (int64_t)bankEmployeeWage *
+                        (int64_t)bankWorkerCount *
+                        (int64_t)wageConsumptionPercent / 100;
                 }
 
                 // A.6: Request loans if needed
@@ -509,6 +531,7 @@ void BailInBailOut::runBenchmarkInAndOut(
                     receivedAcceptances
                 );
 
+                /*
                 if (debug) {
                     ASSERT_AND_LOG_D(
                         (unsigned int)mpiRank,
@@ -530,8 +553,19 @@ void BailInBailOut::runBenchmarkInAndOut(
                         true 
                     );
                 }
+                */
 
                 //...................PHASE E: Bank Updates..................
+
+                BailInBailOut::PreFVerifySnapshots preFSnaps;
+
+                //if (debug) {
+                //    // Snapshot before E.1 
+                //    preFSnaps.bankLiquidityBeforeE1 = localBankLiquidity;
+                //    preFSnaps.bankDebtsBeforeE1 = eLocalBankDebts;
+                //    preFSnaps.firmLiquidityBeforeE1 = localFirmLiquidity;
+                //    preFSnaps.firmDebtsBeforeE1 = localFirmDebts;
+                //}
 
                 // E.1: Repay interbank loans (bankRepayPercent % of them)
                 // The repayments are saved in a buffer
@@ -548,36 +582,99 @@ void BailInBailOut::runBenchmarkInAndOut(
                     eLocalBankDebts
                 );
                 
+                //if (debug) {
+                //    // Snapshot after E.1
+                //    preFSnaps.bankLiquidityAfterE1 = localBankLiquidity;
+                //    preFSnaps.bankDebtsAfterE1 = eLocalBankDebts;
+                //    preFSnaps.firmLiquidityAfterE1 = localFirmLiquidity;
+                //    preFSnaps.firmDebtsAfterE1 = localFirmDebts;
+                //}
+
                 // E.2: Accrue interest on outstanding loans
                 // Applied by the borrower
                 // Iterate debt lists for firms and banks, and update loan amount
-                
+                e2ApplyInterestOnAllLoans(
+                    eLocalBankDebts,
+                    localFirmDebts,
+                    baseSeed,
+                    run,
+                    minInterestRate,
+                    maxInterestRate
+                );
+
+                //if (debug) {
+                //    // Snapshot after E.2
+                //    preFSnaps.bankLiquidityAfterE2 = localBankLiquidity;
+                //    preFSnaps.bankDebtsAfterE2 = eLocalBankDebts;
+                //    preFSnaps.firmLiquidityAfterE2 = localFirmLiquidity;
+                //    preFSnaps.firmDebtsAfterE2 = localFirmDebts;
+                //}
+
                 // E.3: If the bank's liquidity is negative, attempt to 
                 // borrow from another bank (by sending a request message)
-                // Sample up to maxInterbankLenderSamplingK from the adjacency list
+                e3BorrowInterbankIfNegativeLiquidity(
+                    bankCountTotal,
+                    mpiRank,
+                    mpiSize,
+                    bankGlobalStartIndex,
+                    bankCountForRank,
+                    maxInterbankLenderSamplingK,
+                    maxInterbankLoanPercent,
+                    baseSeed,
+                    run,
+                    minInterestRate,
+                    maxInterestRate,
+                    localBankNeighbors,
+                    localBankLiquidity,
+                    eLocalBankDebts
+                );
 
-                // Enforce maxInterbankLoanPercent capacity constraint
-                // Send loan requests to candidate lender bank owners
-                // Lender banks process requests deterministically and grant up to capacity
-                // If granted, write a delta for:
-                // Which global bank ID accepted their request
-                // How much this bank owes them
+                if (debug && step % logEvery == 0) {
+                    //// Snapshot after E.3
+                    //preFSnaps.bankLiquidityAfterE3 = localBankLiquidity;
+                    //preFSnaps.bankDebtsAfterE3 = eLocalBankDebts;
+                    //preFSnaps.firmLiquidityAfterE3 = localFirmLiquidity;
+                    //preFSnaps.firmDebtsAfterE3 = localFirmDebts;
 
-                //...................PHASE F: Settle Interbank Money.................
+                    ASSERT_AND_REPORT_PRE_F(
+                        mpiRank,
+                        mpiSize,
+                        run,
+                        step,
+                        bankCountTotal,
+                        bankGlobalStartIndex,
+                        bankCountForRank,
+                        firmCountTotal,
+                        firmGlobalStartIndex,
+                        firmCountForRank,
+                        localBankLiquidity,
+                        eLocalBankDebts,
+                        localFirmLiquidity,
+                        localFirmDebts,
+                        localBankNeighbors,
+                        baseSeed,
+                        bankWorkerCount,
+                        bankEmployeeWage,
+                        wage,
+                        workerCountTotal,
+                        minInterestRate,
+                        maxInterestRate,
+                        shockMultiplierMin,
+                        shockMultiplierMax,
+                        profitMultiplierMin,
+                        profitMultiplierMax,
+                        wageConsumptionPercent,
+                        true,
+                        true
+                    );
+                }
 
-                    // F.1: Send interbank repayment deltas (and any loan disbursement deltas)
-                    // to the corresponding bank owners
+                //...................PHASE F: Insolvency + Policy..................
 
-                    // F.2: Bank owners update their liquidity 
-
-                    // F.3: Clear interbank buffers
-
-                //...................PHASE G: Insolvency + Policy..................
-
-                    // G.1: Insolvency check for each local bank
+                    // F.1: Insolvency check for each local bank
                     // Insolvent means bank's liquidity is smaller than the total debt
-
-                    // G.2: If insolvent, apply policy
+                    
+                    // F.2: If insolvent, apply policy
                     // Policy 0 (Bail-Out):
                     //   Deficit = amount needed to restore solvency
                     //   Injection = Deficit * bailOutCoveragePercent/100.0
@@ -590,19 +687,19 @@ void BailInBailOut::runBenchmarkInAndOut(
                     //   Each interbank loan owed by this bank gets lowered by the
                     //   haircut fraction (multiplicatively)
 
-                    // G.3: Track bail
+                    // F.3: Track bail
                     // For both policies, track how much bail was granted this step
 
-                    // G.4: Update total bail money
+                    // F.4: Update total bail money
                     // After the bail money for this timestep is finalized,
                     // update the total tracker
 
-                    // G.5: Grace money for failure
+                    // F.5: Grace money for failure
                     // If the coverege is not 100%, the bank might fail
                     // Find the remaining deficit after policy application
                     // Add the deficit to the grace money tracker for this timestep
 
-                    // G.6: Update total grace money
+                    // F.6: Update total grace money
                     // After all banks have been rescued, add the grace money
                     // used this time step to the total grace money tracker
 

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <limits>
+#include <cstdio> // For debug
 
 #include <mpi.h>
 
@@ -32,12 +33,15 @@ public:
         const unsigned int bankCountTotal,
         const unsigned int firmCountTotal,
         const unsigned int workerCountTotal,
+        // How many workers each bank has
+        const unsigned int bankWorkerCount,
 
         /* System Parameters */
         const unsigned int initialBankLiquidity,
         const unsigned int initialFirmLiquidity,
         const unsigned int initialProductionCost,
         const unsigned int wage,
+        const unsigned int bankEmployeeWage,
 
         /* Multipliers (in %, 95 = 0.95 multiplier) */
         unsigned short wageConsumptionPercent,
@@ -60,7 +64,7 @@ public:
 
         /* Bail-In Parameters */
         unsigned short bailInCoveragePercent,
-
+        
         /* Bail-Out Parameters */
         unsigned short bailOutCoveragePercent,
 
@@ -127,7 +131,6 @@ private:
         uint64_t amountGranted;
     };
 
-
     struct Xoshiro256 {
         uint64_t s[4];
 
@@ -148,12 +151,108 @@ private:
         uint64_t amount;
     };
 
+    struct e3InterbankLoanRequest {
+        unsigned int borrowerBankGlobalId;
+        unsigned int lenderBankGlobalId;
+        uint64_t amountRequested;
+        unsigned short lenderInterestRate;
+    };
+
+    struct e3InterbankLoanAcceptance {
+        unsigned int borrowerBankGlobalId;
+        unsigned int lenderBankGlobalId;
+        uint64_t amountGranted;
+    };
+    
+    struct e3NeighborLiquidityMessage {
+        unsigned int bankGlobalId;
+        int64_t liquidity;
+    };
+
+    struct e3LenderOption {
+        unsigned int lenderGlobalId;
+        unsigned short interestRate;
+        int64_t liquidity;
+    };
+
     //<-----!!!!!!!!!!!!!!!!!!!!!!!!MPI DATATYPES!!!!!!!!!!!!!!!!!!!!!!!!----->
     MPI_Datatype a0MakeFirmWorkforceDeltaType();
     MPI_Datatype d1MakeFirmLoanRequestType();
     MPI_Datatype d4MakeFirmLoanAcceptanceType();
     MPI_Datatype c1MakeBankDeltaMessageType();
     MPI_Datatype e1MakeInterbankRepaymentType();
+    MPI_Datatype e3MakeInterbankLoanRequestType();
+    MPI_Datatype e3MakeInterbankLoanAcceptanceType();
+    MPI_Datatype e3MakeNeighborLiquidityMessageType();
+    
+    //<-----!!!!!!!!!!!!!!!!!!!!!!!!DEBUG PROGRAM!!!!!!!!!!!!!!!!!!!!!!!!----->
+    struct PreFVerifySnapshots {
+        // Before E.1
+        vector<int64_t> bankLiquidityBeforeE1;
+        vector<vector<DebtEntry>> bankDebtsBeforeE1;
+        vector<int64_t> firmLiquidityBeforeE1;
+        vector<vector<DebtEntry>> firmDebtsBeforeE1;
+
+        // After E.1 (before E.2)
+        vector<int64_t> bankLiquidityAfterE1;
+        vector<vector<DebtEntry>> bankDebtsAfterE1;
+        vector<int64_t> firmLiquidityAfterE1;
+        vector<vector<DebtEntry>> firmDebtsAfterE1;
+
+        // After E.2 (before E.3)
+        vector<int64_t> bankLiquidityAfterE2;
+        vector<vector<DebtEntry>> bankDebtsAfterE2;
+        vector<int64_t> firmLiquidityAfterE2;
+        vector<vector<DebtEntry>> firmDebtsAfterE2;
+
+        // After E.3 (before Phase F)
+        vector<int64_t> bankLiquidityAfterE3;
+        vector<vector<DebtEntry>> bankDebtsAfterE3;
+        vector<int64_t> firmLiquidityAfterE3;
+        vector<vector<DebtEntry>> firmDebtsAfterE3;
+    };
+
+    static void gatherAndPrintReportRank0Only(
+        unsigned int mpiRank,
+        unsigned int mpiSize,
+        const std::string& localReport
+    );
+
+    static uint64_t sumDebtU64(
+        const vector<BailInBailOut::DebtEntry>& debts
+    );
+
+    void ASSERT_AND_REPORT_PRE_F(
+        unsigned int mpiRank,
+        unsigned int mpiSize,
+        unsigned int run,
+        unsigned int timestep,
+        unsigned int bankCountTotal,
+        unsigned int bankGlobalStartIndex,
+        unsigned int bankCountForRank,
+        unsigned int firmCountTotal,
+        unsigned int firmGlobalStartIndex,
+        unsigned int firmCountForRank,
+        vector<int64_t>& localBankLiquidity,
+        vector<vector<DebtEntry>>& localBankDebts,
+        vector<int64_t>& localFirmLiquidity,
+        vector<vector<DebtEntry>>& localFirmDebts,
+        vector<vector<unsigned int>>& localBankNeighbors,
+        uint64_t baseSeed,
+        unsigned int bankWorkerCount,
+        unsigned int bankEmployeeWage,
+        unsigned int wage,
+        unsigned int workerCountTotal,
+        unsigned short minInterestRate,
+        unsigned short maxInterestRate,
+        unsigned short shockMultiplierMin,
+        unsigned short shockMultiplierMax,
+        unsigned short profitMultiplierMin,
+        unsigned short profitMultiplierMax,
+        unsigned short wageConsumptionPercent,
+        bool printAllBanks,
+        bool hardAbortOnFailure
+    );
 
     //TODO:: ORGANIZE BY FILE & PHASE
     // 
@@ -378,6 +477,31 @@ private:
         vector<vector<DebtEntry>>& localBankDebts
     );
 
+    void e2ApplyInterestOnAllLoans(
+        vector<vector<DebtEntry>>& eLocalBankDebts,
+        vector<vector<DebtEntry>>& localFirmDebts,
+        uint64_t baseSeed,
+        unsigned int run,
+        uint64_t minVal,
+        uint64_t maxVal
+    );
+
+    void e3BorrowInterbankIfNegativeLiquidity(
+        unsigned int bankCountTotal,
+        unsigned int mpiRank,
+        unsigned int mpiSize,
+        unsigned int bankGlobalStartIndex,
+        unsigned int bankCountForRank,
+        unsigned short maxInterbankLenderSamplingK,
+        unsigned short maxInterbankLoanPercent,
+        uint64_t baseSeed,
+        unsigned int run,
+        unsigned short minInterestRate,
+        unsigned short maxInterestRate,
+        vector<vector<unsigned int>>& localBankNeighbors,
+        vector<int64_t>& localBankLiquidity,
+        vector<vector<DebtEntry>>& localBankDebts
+    );
 
     // Exchange all helper
     template<typename T>
@@ -437,6 +561,218 @@ private:
             mpiType,
             MPI_COMM_WORLD
         );
+
+        // Clear outboxes
+        for (unsigned int r = 0; r < mpiSize; r++) {
+            toRank[r].clear();
+        }
+    }
+
+    template<typename T>
+    void sparseDirectExchange(
+        unsigned int mpiRank,
+        unsigned int mpiSize,
+        vector<vector<T>>& toRank,
+        vector<T>& received,
+        MPI_Datatype mpiType,
+        int countTag,
+        int dataTag
+    ) {
+
+        // Indicates whether THIS rank will send any payload to dst rank
+        vector<int> willSendToRank(mpiSize, 0);
+        for (unsigned int dstRank = 0; dstRank < mpiSize; dstRank++) {
+            willSendToRank[dstRank] = (toRank[dstRank].empty() ? 0 : 1);
+        }
+
+        // Build a global send-mask matrix: [srcRank][dstRank]
+        vector<int> allSendMasks(mpiSize * mpiSize, 0);
+
+        MPI_Allgather(
+            willSendToRank.data(),
+            (int)mpiSize,
+            MPI_INT,
+            allSendMasks.data(),
+            (int)mpiSize,
+            MPI_INT,
+            MPI_COMM_WORLD
+        );
+
+        // Indicates whether THIS rank will receive any payload from src rank
+        vector<int> willReceiveFromRank(mpiSize, 0);
+        for (unsigned int srcRank = 0; srcRank < mpiSize; srcRank++) {
+            willReceiveFromRank[srcRank] =
+                allSendMasks[(size_t)srcRank * (size_t)mpiSize + (size_t)mpiRank];
+        }
+
+        // -----------------------------
+        // Exchange counts
+        // -----------------------------
+
+        vector<int> incomingCounts(mpiSize, 0);
+        vector<MPI_Request> countReceives;
+
+        for (unsigned int srcRank = 0; srcRank < mpiSize; srcRank++) {
+            if (srcRank == mpiRank) {
+                continue;
+            }
+            if (!willReceiveFromRank[srcRank]) {
+                continue;
+            }
+
+            /*
+            int count = (int)toRank[srcRank].size();
+            if (count <= 0) {
+                continue;
+            }
+            size_t elemSize = sizeof(T);
+            size_t totalBytes = elemSize * (size_t)count;
+            std::printf("[Rank %u] RECEIVE to rank %u: count=%d elemSize=%zu totalBytes=%zu countTag=%d dataTag=%d\n",
+                mpiRank, srcRank, count, elemSize, totalBytes, countTag, dataTag);
+            std::fflush(stdout);
+            */
+
+            MPI_Request req;
+            MPI_Irecv(
+                &incomingCounts[srcRank],
+                1,
+                MPI_INT,
+                (int)srcRank,
+                countTag,
+                MPI_COMM_WORLD,
+                &req
+            );
+            countReceives.push_back(req);
+        }
+
+        vector<MPI_Request> countSends;
+
+        for (unsigned int dstRank = 0; dstRank < mpiSize; dstRank++) {
+            if (dstRank == mpiRank) {
+                continue;
+            }
+            if (!willSendToRank[dstRank]) {
+                continue;
+            }
+
+            int outCount = (int)toRank[dstRank].size();
+
+            /*
+            int count = (int)toRank[dstRank].size();
+            if (count <= 0) {
+                continue;
+            }
+
+            size_t elemSize = sizeof(T);
+            size_t totalBytes = elemSize * (size_t)count;
+            printf("[Rank %u] SEND to rank %u: count=%d elemSize=%zu totalBytes=%zu countTag=%d dataTag=%d\n",
+                (unsigned)mpiRank,
+                (unsigned)dstRank,
+                (int)count,
+                (size_t)elemSize,
+                (size_t)totalBytes,
+                (int)countTag,
+                (int)dataTag);
+            fflush(stdout);
+            */
+
+            MPI_Request req;
+            MPI_Isend(
+                &outCount,
+                1,
+                MPI_INT,
+                (int)dstRank,
+                countTag,
+                MPI_COMM_WORLD,
+                &req
+            );
+            countSends.push_back(req);
+        }
+
+        if (!countReceives.empty()) {
+            MPI_Waitall((int)countReceives.size(), countReceives.data(), MPI_STATUSES_IGNORE);
+        }
+        if (!countSends.empty()) {
+            MPI_Waitall((int)countSends.size(), countSends.data(), MPI_STATUSES_IGNORE);
+        }
+
+        // -----------------------------
+        // Exchange payloads
+        // -----------------------------
+
+        vector<vector<T>> incomingByRank(mpiSize);
+        vector<MPI_Request> payloadReceives;
+
+        for (unsigned int srcRank = 0; srcRank < mpiSize; srcRank++) {
+            if (srcRank == mpiRank) {
+                continue;
+            }
+
+            int count = incomingCounts[srcRank];
+            if (count <= 0) {
+                continue;
+            }
+
+            incomingByRank[srcRank].resize((size_t)count);
+
+            MPI_Request req;
+            MPI_Irecv(
+                incomingByRank[srcRank].data(),
+                count,
+                mpiType,
+                (int)srcRank,
+                dataTag,
+                MPI_COMM_WORLD,
+                &req
+            );
+            payloadReceives.push_back(req);
+        }
+
+        vector<MPI_Request> payloadSends;
+
+        for (unsigned int dstRank = 0; dstRank < mpiSize; dstRank++) {
+            if (dstRank == mpiRank) {
+                continue;
+            }
+            if (!willSendToRank[dstRank]) {
+                continue;
+            }
+
+            int count = (int)toRank[dstRank].size();
+            if (count <= 0) {
+                continue;
+            }
+
+            MPI_Request req;
+            MPI_Isend(
+                toRank[dstRank].data(),
+                count,
+                mpiType,
+                (int)dstRank,
+                dataTag,
+                MPI_COMM_WORLD,
+                &req
+            );
+            payloadSends.push_back(req);
+        }
+
+        if (!payloadReceives.empty()) {
+            MPI_Waitall((int)payloadReceives.size(), payloadReceives.data(), MPI_STATUSES_IGNORE);
+        }
+        if (!payloadSends.empty()) {
+            MPI_Waitall((int)payloadSends.size(), payloadSends.data(), MPI_STATUSES_IGNORE);
+        }
+
+
+        // Flatten all received payloads
+        received.clear();
+
+        for (unsigned int srcRank = 0; srcRank < mpiSize; srcRank++) {
+            vector<T>& list = incomingByRank[srcRank];
+            for (unsigned int i = 0; i < list.size(); i++) {
+                received.push_back(list[i]);
+            }
+        }
 
         // Clear outboxes
         for (unsigned int r = 0; r < mpiSize; r++) {

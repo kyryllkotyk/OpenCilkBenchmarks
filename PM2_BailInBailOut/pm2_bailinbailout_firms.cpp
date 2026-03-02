@@ -335,23 +335,19 @@ void BailInBailOut::a6RequestFirmLoans(
 
         for (unsigned int i = 1; i < candidates.size(); i++) {
             unsigned int bankGlobalId = candidates[i];
-
-            uint64_t candidateSeed = makeSeed(
-                baseSeed,
-                run,
-                0,
-                bankGlobalId,
-                STREAM_INTEREST_RATE_SELECTION
-            );
-
             // Get the rate for that bank
             // NOTE: We can use seeding to do that since it is deterministic
             // baseSeed and time step are constants for this, and so is
             // the run in relation to the current action
             // and global bank IDs are the ones saved as neighbors, so it's
             // easier to regenerate the rate rather than messaging for it
-            unsigned short rate = (unsigned short)
-                randomInRangeFromSeed(candidateSeed, minInterestRate, maxInterestRate);
+            unsigned short rate = getInterestRate(
+                baseSeed,
+                run,
+                bestBankGlobalId,
+                minInterestRate,
+                maxInterestRate
+            );
 
             if (rate < bestRate ||
                 (rate == bestRate && bankGlobalId < bestBankGlobalId)) {
