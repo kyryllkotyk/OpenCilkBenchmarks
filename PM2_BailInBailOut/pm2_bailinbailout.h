@@ -1,5 +1,5 @@
-#ifndef BAIL_IN_BAIL_OUT_
-#define BAIL_IN_BAIL_OUT_ 
+#ifndef PM2_BAIL_IN_BAIL_OUT_
+#define PM2_BAIL_IN_BAIL_OUT_ 
 
 #include <iostream>
 #include <vector>
@@ -64,7 +64,7 @@ public:
 
         /* Bail-In Parameters */
         unsigned short bailInCoveragePercent,
-        
+
         /* Bail-Out Parameters */
         unsigned short bailOutCoveragePercent,
 
@@ -72,65 +72,13 @@ public:
     );
 
 private:
-    //<-----!!!!!!!!!!!!!!!!!!!!!!!!!STRUCTURES!!!!!!!!!!!!!!!!!!!!!!!!!----->
 
-    struct DebtEntry {
-        // Global bank ID
-        unsigned int lenderBankGlobalId;
-        // How much is owed
-        uint64_t amount;
-    };
+    /**************************************************************************
+    * This header section defines all functions implemented in the file       *
+    * pm2_bailinbailout_rng.cpp                                               *
+    **************************************************************************/ 
 
-    struct a0FirmWorkforceDeltaMessage {
-        unsigned int firmGlobalId;
-        uint64_t delta;
-    };
-
-    struct FirmLoanRequest {
-        unsigned int firmGlobalId;
-        unsigned int lenderBankGlobalId;
-        uint64_t amountRequested;
-        unsigned short lenderInterestRate;
-    };
-
-    struct c1BankDeltaMessage {
-        unsigned int bankGlobalId;
-        int64_t delta;
-    };
-
-    struct d2FirmLoanAcceptance {
-        // Must use GLOBAL IDs
-        unsigned int firmGlobalId;
-        unsigned int lenderBankGlobalId;
-        uint64_t amountGranted;
-    };
-
-    struct DDebugBankStats {
-        unsigned int bankGlobalId;
-        int64_t liquidityBeforeD3;
-        uint64_t capThisStep;
-        uint64_t outflowThisStep;
-        int64_t liquidityAfterD3;
-
-        uint64_t requestCount;
-        uint64_t grantCount;
-        uint64_t totalGranted;
-    };
-
-    struct DDebugFirmStats {
-        unsigned int firmGlobalId;
-        int64_t liquidityBeforeD5;
-        int64_t liquidityAfterD5;
-        uint64_t newDebtCount;
-        uint64_t totalBorrowed;
-    };
-
-    struct DDebugGrantEdge {
-        unsigned int firmGlobalId;
-        unsigned int lenderBankGlobalId;
-        uint64_t amountGranted;
-    };
-
+    //===============================STRUCTURES================================
     struct Xoshiro256 {
         uint64_t s[4];
 
@@ -146,148 +94,43 @@ private:
         double nextInRangeDouble(double min, double max);
     };
 
-    struct e1InterbankRepaymentMessage {
-        unsigned int lenderBankGlobalId;
-        uint64_t amount;
-    };
-
-    struct e3InterbankLoanRequest {
-        unsigned int borrowerBankGlobalId;
-        unsigned int lenderBankGlobalId;
-        uint64_t amountRequested;
-        unsigned short lenderInterestRate;
-    };
-
-    struct e3InterbankLoanAcceptance {
-        unsigned int borrowerBankGlobalId;
-        unsigned int lenderBankGlobalId;
-        uint64_t amountGranted;
-    };
-    
-    struct e3NeighborLiquidityMessage {
-        unsigned int bankGlobalId;
-        int64_t liquidity;
-    };
-
-    struct e3LenderOption {
-        unsigned int lenderGlobalId;
-        unsigned short interestRate;
-        int64_t liquidity;
-    };
-
-    //<-----!!!!!!!!!!!!!!!!!!!!!!!!MPI DATATYPES!!!!!!!!!!!!!!!!!!!!!!!!----->
-    MPI_Datatype a0MakeFirmWorkforceDeltaType();
-    MPI_Datatype d1MakeFirmLoanRequestType();
-    MPI_Datatype d4MakeFirmLoanAcceptanceType();
-    MPI_Datatype c1MakeBankDeltaMessageType();
-    MPI_Datatype e1MakeInterbankRepaymentType();
-    MPI_Datatype e3MakeInterbankLoanRequestType();
-    MPI_Datatype e3MakeInterbankLoanAcceptanceType();
-    MPI_Datatype e3MakeNeighborLiquidityMessageType();
-    
-    //<-----!!!!!!!!!!!!!!!!!!!!!!!!DEBUG PROGRAM!!!!!!!!!!!!!!!!!!!!!!!!----->
-    struct PreFVerifySnapshots {
-        // Before E.1
-        vector<int64_t> bankLiquidityBeforeE1;
-        vector<vector<DebtEntry>> bankDebtsBeforeE1;
-        vector<int64_t> firmLiquidityBeforeE1;
-        vector<vector<DebtEntry>> firmDebtsBeforeE1;
-
-        // After E.1 (before E.2)
-        vector<int64_t> bankLiquidityAfterE1;
-        vector<vector<DebtEntry>> bankDebtsAfterE1;
-        vector<int64_t> firmLiquidityAfterE1;
-        vector<vector<DebtEntry>> firmDebtsAfterE1;
-
-        // After E.2 (before E.3)
-        vector<int64_t> bankLiquidityAfterE2;
-        vector<vector<DebtEntry>> bankDebtsAfterE2;
-        vector<int64_t> firmLiquidityAfterE2;
-        vector<vector<DebtEntry>> firmDebtsAfterE2;
-
-        // After E.3 (before Phase F)
-        vector<int64_t> bankLiquidityAfterE3;
-        vector<vector<DebtEntry>> bankDebtsAfterE3;
-        vector<int64_t> firmLiquidityAfterE3;
-        vector<vector<DebtEntry>> firmDebtsAfterE3;
-    };
-
-    static void gatherAndPrintReportRank0Only(
-        unsigned int mpiRank,
-        unsigned int mpiSize,
-        const std::string& localReport
+    static uint64_t splitmix64Hash(
+        uint64_t x
     );
 
-    static uint64_t sumDebtU64(
-        const vector<BailInBailOut::DebtEntry>& debts
+    unsigned int selectForWorker(
+        uint64_t baseSeed,
+        unsigned int workerGlobalId,
+        unsigned int countTotal,
+        uint64_t streamTag = 1
     );
 
-    void ASSERT_AND_REPORT_PRE_F(
-        unsigned int mpiRank,
-        unsigned int mpiSize,
+    static uint64_t makeSeed(
+        uint64_t baseSeed,
         unsigned int run,
         unsigned int timestep,
-        unsigned int bankCountTotal,
-        unsigned int bankGlobalStartIndex,
-        unsigned int bankCountForRank,
-        unsigned int firmCountTotal,
-        unsigned int firmGlobalStartIndex,
-        unsigned int firmCountForRank,
-        vector<int64_t>& localBankLiquidity,
-        vector<vector<DebtEntry>>& localBankDebts,
-        vector<int64_t>& localFirmLiquidity,
-        vector<vector<DebtEntry>>& localFirmDebts,
-        vector<vector<unsigned int>>& localBankNeighbors,
-        uint64_t baseSeed,
-        unsigned int bankWorkerCount,
-        unsigned int bankEmployeeWage,
-        unsigned int wage,
-        unsigned int workerCountTotal,
-        unsigned short minInterestRate,
-        unsigned short maxInterestRate,
-        unsigned short shockMultiplierMin,
-        unsigned short shockMultiplierMax,
-        unsigned short profitMultiplierMin,
-        unsigned short profitMultiplierMax,
-        unsigned short wageConsumptionPercent,
-        bool printAllBanks,
-        bool hardAbortOnFailure
+        unsigned int globalId,
+        uint64_t streamTag
     );
 
-    //TODO:: ORGANIZE BY FILE & PHASE
-    // 
-    // Ensures correctness up to D
-    void ASSERT_CORRECTNESS_D(
-        unsigned int bankCountTotal,
-        unsigned short maxFirmLoanPercent,
-        unsigned int bankCountForRank,
-        vector<int64_t>& bankLiquidityBeforeD3,
-        vector<uint64_t>& bankFirmLoanOutflow,
-        vector<int64_t>& localBankLiquidityAfterD3,
-        unsigned int firmCountForRank,
-        vector<int64_t>& firmLiquidityBeforeD5,
-        vector<int64_t>& localFirmLiquidityAfterD5,
-        vector<unsigned int>& firmDebtCountBeforeD5,
-        vector<vector<DebtEntry>>& localFirmDebtsAfterD5);
+    unsigned short percent0to100FromMixedSeed(
+        uint64_t seed
+    );
 
-    void ASSERT_AND_LOG_D(
-        unsigned int mpiRank, 
-        unsigned int mpiSize,
-        unsigned int bankCountTotal, 
-        unsigned int bankGlobalStartIndex, 
-        unsigned int bankCountForRank,
-        unsigned int firmGlobalStartIndex, 
-        unsigned int firmCountForRank,
-        unsigned short maxFirmLoanPercent, 
-        vector<int64_t>& bankLiquidityBeforeD3, 
-        vector<int64_t>& firmLiquidityBeforeD5, 
-        vector<unsigned int>& firmDebtCountBeforeD5, 
-        vector<int64_t>& localBankLiquidity,
-        vector<int64_t>& localFirmLiquidity, 
-        vector<vector<DebtEntry>>& localFirmDebts,
-        vector<uint64_t>& bankFirmLoanOutflow, 
-        vector<DDebugGrantEdge>& grantsThisStep,
-        bool printEdges
+    uint64_t randomInRangeFromSeed(
+        uint64_t seed,
+        uint64_t minVal,
+        uint64_t maxVal
+    );
+
+    /**************************************************************************
+    * This header section defines all functions implemented in the file       *
+    * pm2_bailinbailout_utils.cpp                                             *
+    **************************************************************************/
+
+    uint64_t percentFloorU64(
+        uint64_t x,
+        unsigned short pct
     );
 
     // Clamps fractions and checks for faulty parameters
@@ -333,38 +176,97 @@ private:
         unsigned int totalRanks
     );
 
-
-    static uint64_t splitmix64Hash(
-        uint64_t x
+    unsigned int ownerRankFromGlobalId(
+        unsigned int bankCountTotal,
+        unsigned int totalRanks,
+        unsigned int globalId
     );
 
-    unsigned int selectForWorker(
-        uint64_t baseSeed,
-        unsigned int workerGlobalId,
-        unsigned int countTotal,
-        uint64_t streamTag = 1
-    );
-
-    static uint64_t makeSeed(
+    unsigned int getInterestRate(
         uint64_t baseSeed,
         unsigned int run,
-        unsigned int timestep,
         unsigned int globalId,
-        uint64_t streamTag
-    );
-
-    unsigned short percent0to100FromMixedSeed(
-        uint64_t seed
-    );
-
-    uint64_t randomInRangeFromSeed(
-        uint64_t seed,
         uint64_t minVal,
-        uint64_t maxVal);
+        uint64_t maxVal
+    );
 
-    uint64_t percentFloorU64(
-        uint64_t x,
-        unsigned short pct
+    static void gatherAndPrintReportRank0Only(
+        unsigned int mpiRank,
+        unsigned int mpiSize,
+        const std::string& localReport
+    );
+
+    static uint64_t sumDebtU64(
+        const vector<BailInBailOut::DebtEntry>& debts
+    );
+
+    void ASSERT_AND_REPORT_PRE_F(
+        unsigned int mpiRank,
+        unsigned int mpiSize,
+        unsigned int run,
+        unsigned int timestep,
+        unsigned int bankCountTotal,
+        unsigned int bankGlobalStartIndex,
+        unsigned int bankCountForRank,
+        unsigned int firmCountTotal,
+        unsigned int firmGlobalStartIndex,
+        unsigned int firmCountForRank,
+        vector<int64_t>& localBankLiquidity,
+        vector<vector<DebtEntry>>& localBankDebts,
+        vector<int64_t>& localFirmLiquidity,
+        vector<vector<DebtEntry>>& localFirmDebts,
+        vector<vector<unsigned int>>& localBankNeighbors,
+        uint64_t baseSeed,
+        unsigned int bankWorkerCount,
+        unsigned int bankEmployeeWage,
+        unsigned int wage,
+        unsigned int workerCountTotal,
+        unsigned short minInterestRate,
+        unsigned short maxInterestRate,
+        unsigned short shockMultiplierMin,
+        unsigned short shockMultiplierMax,
+        unsigned short profitMultiplierMin,
+        unsigned short profitMultiplierMax,
+        unsigned short wageConsumptionPercent,
+        bool printAllBanks,
+        bool hardAbortOnFailure
+    );
+
+    /**************************************************************************
+    * This header section defines all functions implemented in the file       *
+    * pm2_bailinbailout_firms.cpp                                             *
+    **************************************************************************/
+
+    //================================STRUCTURES===============================
+
+    struct DebtEntry {
+        // Global bank ID
+        unsigned int lenderBankGlobalId;
+        // How much is owed
+        uint64_t amount;
+    };
+
+    struct FirmLoanRequest {
+        unsigned int firmGlobalId;
+        unsigned int lenderBankGlobalId;
+        uint64_t amountRequested;
+        unsigned short lenderInterestRate;
+    };
+
+    //================================DATATYPES================================
+
+    MPI_Datatype a0MakeFirmWorkforceDeltaType();
+
+    //================================FUNCTIONS================================
+
+    void buildFirmNeighbors(
+        uint64_t baseSeed,
+        unsigned int run,
+        unsigned int firmGlobalId,
+        unsigned int bankCountTotal,
+        unsigned int firmLenderDegree,
+        uint64_t stream,
+        vector<unsigned int>& outNeighbors
     );
 
     void repayFirmLoansProRata(
@@ -374,28 +276,10 @@ private:
         vector<int64_t>& bankIncomingFromFirmRepay
     );
 
-    void buildFirmNeighbors(
-        uint64_t baseSeed,
-        unsigned int run,
-        unsigned int firmGlobalId,
-        unsigned int bankCountTotal,
-        unsigned int firmLenderDegree,
-        uint64_t stream,
-        vector<unsigned int>& outNeighbors);
-
-    unsigned int ownerRankFromGlobalId(
-        unsigned int bankCountTotal,
-        unsigned int totalRanks,
-        unsigned int globalId
-    );
-
-    unsigned int getInterestRate(
-        uint64_t baseSeed, 
-        unsigned int run,
-        unsigned int globalId, 
-        uint64_t minVal,
-        uint64_t maxVal
-    );
+    struct a0FirmWorkforceDeltaMessage {
+        unsigned int firmGlobalId;
+        uint64_t delta;
+    };
 
     void a0ComputeFirmWorkforceCost(
         unsigned int firmCountTotal,
@@ -420,6 +304,66 @@ private:
         vector<vector<unsigned int>>& localFirmNeighbors,
         vector<vector<FirmLoanRequest>>& firmLoanRequestsToRank
     );
+
+    /**************************************************************************
+    * This header section defines all functions implemented in the file       *
+    * pm2_bailinbailout_banks.cpp                                             *
+    **************************************************************************/
+    
+    //===============================STRUCTURES================================
+
+    struct c1BankDeltaMessage {
+        unsigned int bankGlobalId;
+        int64_t delta;
+    };
+
+    struct d2FirmLoanAcceptance {
+        // Must use GLOBAL IDs
+        unsigned int firmGlobalId;
+        unsigned int lenderBankGlobalId;
+        uint64_t amountGranted;
+    };
+
+    struct e1InterbankRepaymentMessage {
+        unsigned int lenderBankGlobalId;
+        uint64_t amount;
+    };
+
+    struct e3InterbankLoanRequest {
+        unsigned int borrowerBankGlobalId;
+        unsigned int lenderBankGlobalId;
+        uint64_t amountRequested;
+        unsigned short lenderInterestRate;
+    };
+
+    struct e3InterbankLoanAcceptance {
+        unsigned int borrowerBankGlobalId;
+        unsigned int lenderBankGlobalId;
+        uint64_t amountGranted;
+    };
+
+    struct e3NeighborLiquidityMessage {
+        unsigned int bankGlobalId;
+        int64_t liquidity;
+    };
+
+    struct e3LenderOption {
+        unsigned int lenderGlobalId;
+        unsigned short interestRate;
+        int64_t liquidity;
+    };
+
+    //================================DATATYPES================================
+
+    MPI_Datatype d1MakeFirmLoanRequestType();
+    MPI_Datatype d4MakeFirmLoanAcceptanceType();
+    MPI_Datatype c1MakeBankDeltaMessageType();
+    MPI_Datatype e1MakeInterbankRepaymentType();
+    MPI_Datatype e3MakeInterbankLoanRequestType();
+    MPI_Datatype e3MakeInterbankLoanAcceptanceType();
+    MPI_Datatype e3MakeNeighborLiquidityMessageType();
+
+    //================================FUNCTIONS================================
 
     void c1SendMoneyToBanks(
         unsigned int bankCountTotal,
@@ -454,23 +398,23 @@ private:
     );
 
     void d4SendFirmLoanAcceptances(
-        unsigned int mpiSize, 
-        vector<vector<d2FirmLoanAcceptance>>& firmLoanAcceptancesToRank, 
+        unsigned int mpiSize,
+        vector<vector<d2FirmLoanAcceptance>>& firmLoanAcceptancesToRank,
         vector<d2FirmLoanAcceptance>& receivedAcceptances
     );
 
     void d5ApplyFirmLoanAcceptances(
         unsigned int firmGlobalStartIndex,
-        vector<int64_t>& localFirmLiquidity, 
-        vector<vector<DebtEntry>>& localFirmDebts, 
+        vector<int64_t>& localFirmLiquidity,
+        vector<vector<DebtEntry>>& localFirmDebts,
         vector<d2FirmLoanAcceptance>& receivedAcceptances
     );
 
     void e1RepayInterbankLoans(
-        unsigned int bankCountTotal, 
+        unsigned int bankCountTotal,
         unsigned int mpiRank,
-        unsigned int mpiSize, 
-        unsigned int bankGlobalStartIndex, 
+        unsigned int mpiSize,
+        unsigned int bankGlobalStartIndex,
         unsigned int bankCountForRank,
         unsigned short bankRepayPercent,
         vector<int64_t>& localBankLiquidity,
@@ -502,6 +446,11 @@ private:
         vector<int64_t>& localBankLiquidity,
         vector<vector<DebtEntry>>& localBankDebts
     );
+
+    /**************************************************************************
+    * This header section defines and implements                              *
+    * all templated functions used by the program                             *
+    **************************************************************************/
 
     // Exchange all helper
     template<typename T>
