@@ -344,7 +344,7 @@ void BailInBailOut::a6RequestFirmLoans(
             unsigned short rate = getInterestRate(
                 baseSeed,
                 run,
-                bestBankGlobalId,
+                bankGlobalId,
                 minInterestRate,
                 maxInterestRate
             );
@@ -372,4 +372,5 @@ void BailInBailOut::a6RequestFirmLoans(
         );
     }
 }
+
 
