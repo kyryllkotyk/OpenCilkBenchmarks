@@ -1,13 +1,13 @@
 #include "pm2_bailinbailout.h"
 
 /*<===========================================================================>
- 
+
     Winter 2026
     Author: Kyryll Kotyk
     Advisor: Munehiro Fukuda
 
-    This file calls all phase implementations using given parameters 
-    
+    This file calls all phase implementations using given parameters
+
     Style Note:
         One parameter per line for function signatures
         Parantheses are closed on a new line, followed by body brace opening
@@ -55,6 +55,8 @@ void BailInBailOut::runBenchmarkInAndOut(
     unsigned short firmRepayPercent,
     unsigned short bankRepayPercent,
 
+    unsigned int interventionDelay,
+
     /* Bail-In Parameters */
     unsigned short bailInCoveragePercent,
 
@@ -75,7 +77,7 @@ void BailInBailOut::runBenchmarkInAndOut(
         shockMultiplierMin, shockMultiplierMax, minInterestRate, maxInterestRate,
         interbankDensity, maxInterbankLenderSamplingK, maxInterbankLoanPercent,
         maxFirmLoanPercent, firmLenderDegree, firmRepayPercent,
-        bankRepayPercent, bailInCoveragePercent, bailOutCoveragePercent)) {
+        bankRepayPercent, interventionDelay, bailInCoveragePercent, bailOutCoveragePercent)) {
         return;
     }
 
@@ -123,10 +125,37 @@ void BailInBailOut::runBenchmarkInAndOut(
     workerCountForRank = workerPair.first;
     workerGlobalStartIndex = workerPair.second;
 
+    uint64_t totalBailOutMoney = 0, totalBailInMoney = 0, totalGraceMoney = 0;
+    // Pre-F snapshots (captured after E.3, before f1f2 runs)
+    vector<int64_t> preFBankLiquidity;
+    vector<vector<DebtEntry>> preFBankDebts;
+    vector<unsigned int> preFBankDistressCount;
+    // Phase-level snapshots for mid-step correctness verification
+    // snapPostA: after A.5.5 employee wages deducted (firm repayments NOT yet applied)
+    // snapPostC: after c1SendMoneyToBanks (deposits + repayments received)
+    // snapPostD: after D.3 firm loan outflows applied
+    vector<int64_t> snapPostABankLiq;
+    vector<int64_t> snapPostCBankLiq;
+    vector<int64_t> snapPostDBankLiq;
     for (int run = 0; run < runs; run++) {
+
         // Policy = 0 -> Bail-In
         // Policy = 1 -> Bail-Out
         for (int policy = 0; policy <= 1; policy++) {
+
+            // Build the per-(run, policy) debug output folder once here so
+            // all timestep files land in the same directory regardless of
+            // how long the run takes. Rank 0 creates the folder; the path
+            // is broadcast so every rank agrees on the name.
+            std::string auditRunFolder;
+            if (debug) {
+                auditRunFolder = auditBuildRunFolder(
+                    (unsigned int)mpiRank,
+                    (unsigned int)mpiSize,
+                    (unsigned int)run,
+                    (unsigned int)policy
+                );
+            }
 
             // <!===========================================================!>
             // <!===================!Create Local Arrays!===================!>
@@ -138,16 +167,17 @@ void BailInBailOut::runBenchmarkInAndOut(
             vector<unsigned short> localBankInterestRate(bankCountForRank);
             vector<int64_t> wageDepositBuffer(bankCountTotal);
             vector<FirmLoanRequest> receivedLoanRequests(0);
-           
+
             vector<vector<d2FirmLoanAcceptance>> firmLoanAcceptancesToRank(mpiSize);
             vector<uint64_t> bankFirmLoanOutflow(bankCountForRank);
             vector<d2FirmLoanAcceptance> receivedAcceptances;
             vector<vector<DebtEntry>> eLocalBankDebts(bankCountForRank);
+            vector<unsigned int> bankDistressCount(bankCountForRank, 0);
 
             // Firm Arrays
-            vector<int64_t> localFirmLiquidity(firmCountForRank, 
+            vector<int64_t> localFirmLiquidity(firmCountForRank,
                 initialFirmLiquidity);
-            vector<uint64_t> localFirmProductionCost(firmCountForRank, 
+            vector<uint64_t> localFirmProductionCost(firmCountForRank,
                 initialProductionCost);
             vector<vector<unsigned int>> localFirmNeighbors(firmCountForRank);
             vector<vector<DebtEntry>> localFirmDebts(firmCountForRank);
@@ -303,11 +333,7 @@ void BailInBailOut::runBenchmarkInAndOut(
             // <!====================!Main TimeStep Loop!====================!>
             // <!============================================================!>
 
-            // debug item
-            vector<DDebugGrantEdge> grantsThisStep;
-
             for (int step = 0; step < timesteps; step++) {
-                //grantsThisStep.clear();
 
                 //..............PHASE A: Firms and Worker Updates..............
 
@@ -362,14 +388,14 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                     localFirmLiquidity[f] += localFirmProductionCost[f] *
                         (profitMultiplier / 100.0) - localFirmWorkforceCost[f];
-                    
+
                     // A.5: Repay bank loans (firmRepayPercent % of the loan)
 
-                        // If liquidity is smaller than the percentage of the loan
-                        // -> Pay all of liquidity
+                    // If liquidity is smaller than the percentage of the loan
+                    // -> Pay all of liquidity
 
-                        // If liquidity is negative
-                        // -> Don't pay at all
+                    // If liquidity is negative
+                    // -> Don't pay at all
 
                     repayFirmLoansProRata(
                         localFirmLiquidity[f],
@@ -383,20 +409,17 @@ void BailInBailOut::runBenchmarkInAndOut(
                 // They keep a percentage of it in their bank accounts
                 // A bank employee deposits into the bank they work for
                 for (int bankID = 0; bankID < bankCountForRank; bankID++) {
-                    localBankLiquidity[bankID] -= 
+                    localBankLiquidity[bankID] -=
                         (int64_t)bankEmployeeWage *
                         (int64_t)bankWorkerCount *
                         (int64_t)wageConsumptionPercent / 100;
                 }
 
-                // A.6: Request loans if needed
+                // Snapshot A: bank liquidity after employee wages, before C deposits
+                if (debug && step % logEvery == 0)
+                    snapPostABankLiq = localBankLiquidity;
 
-                // If the liquidity is negative, request a loan
-                // Sample minimum of firmLenderSampleK and degree # of 
-                // candidate banks from the adjacency list
-                // If lender has enough liquidity and lower interest rate 
-                // than the currently best choice, set as the best choice
-                // Save the request in a buffer
+                // A.6: Request loans if needed
 
                 // Clear request buffer
                 for (int r = 0; r < mpiSize; r++) {
@@ -418,8 +441,8 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                 //.....................PHASE B: Worker Deposits....................
 
-                    // B.1: Consume part of wage and deposit the rest
-                    // (record transaction to buffer)
+                // B.1: Consume part of wage and deposit the rest
+                // (record transaction to buffer)
                 uint64_t depositPerW = ((uint64_t)wage *
                     (uint64_t)(100 - wageConsumptionPercent)) / 100ULL;
 
@@ -432,10 +455,10 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                 //...................PHASE C: Send Money to Banks .................
 
-                    // C.1: Send worker money and firm loan repayment deltas to the 
-                    // corresponding bank (account for global and local ID conversion)
-                    // C.2: Update bank balances
-                    // C.1 and C2 were bundled together
+                // C.1: Send worker money and firm loan repayment deltas to the 
+                // corresponding bank (account for global and local ID conversion)
+                // C.2: Update bank balances
+                // C.1 and C2 were bundled together
 
                 c1SendMoneyToBanks(
                     bankCountTotal,
@@ -447,6 +470,10 @@ void BailInBailOut::runBenchmarkInAndOut(
                     wageDepositBuffer,
                     bankIncomingFromFirmRepay
                 );
+
+                // Snapshot C: bank liquidity after worker deposits + firm repayments received
+                if (debug && step % logEvery == 0)
+                    snapPostCBankLiq = localBankLiquidity;
 
                 //......................PHASE D: Request Loans.....................
 
@@ -461,67 +488,38 @@ void BailInBailOut::runBenchmarkInAndOut(
                 );
 
                 // D.2: Banks process loan requests by ID
-
-                if (debug) {
-                    d2ProcessFirmLoanRequests(
-                        firmCountTotal,
-                        bankCountForRank,
-                        bankGlobalStartIndex,
-                        mpiSize,
-                        maxFirmLoanPercent,
-                        localBankLiquidity,
-                        receivedLoanRequests,
-                        firmLoanAcceptancesToRank,
-                        bankFirmLoanOutflow,
-                        &grantsThisStep,
-                        true
-                    );
-                }
-                else {
-                    d2ProcessFirmLoanRequests(
-                        firmCountTotal,
-                        bankCountForRank,
-                        bankGlobalStartIndex,
-                        mpiSize,
-                        maxFirmLoanPercent,
-                        localBankLiquidity,
-                        receivedLoanRequests,
-                        firmLoanAcceptancesToRank,
-                        bankFirmLoanOutflow,
-                        &grantsThisStep,
-                        false
-                    );
-                }
-
-                //TODO:: REMOVE BEFORE BENCHMARKING
-                auto bankLiquidityBeforeD3 = localBankLiquidity;
-
+                d2ProcessFirmLoanRequests(
+                    firmCountTotal,
+                    bankCountForRank,
+                    bankGlobalStartIndex,
+                    mpiSize,
+                    maxFirmLoanPercent,
+                    localBankLiquidity,
+                    receivedLoanRequests,
+                    firmLoanAcceptancesToRank,
+                    bankFirmLoanOutflow
+                );
 
                 // D.3: Banks update their liquidity to reflect accepted loans
                 for (unsigned int b = 0; b < bankCountForRank; b++) {
                     localBankLiquidity[b] -= (int64_t)bankFirmLoanOutflow[b];
 
                     // Liquidity should not go negative from lending
-                    if (localBankLiquidity[b] < 0) {
+                    if (bankFirmLoanOutflow[b] > 0 && localBankLiquidity[b] < 0) {
                         printf("ERROR: Bank liquidity negative after D3\n");
                     }
                 }
-                
-                
+
+                // Snapshot D: bank liquidity after firm loan outflows (pre-E, pre-F)
+                if (debug && step % logEvery == 0)
+                    snapPostDBankLiq = localBankLiquidity;
+
                 // D.4: Banks send back acceptances 
                 d4SendFirmLoanAcceptances(
                     mpiSize,
                     firmLoanAcceptancesToRank,
                     receivedAcceptances
                 );
-
-                //TODO:: REMOVE BEFORE BENCHMARKING
-                auto firmLiquidityBeforeD5 = localFirmLiquidity;
-
-                vector<unsigned int> firmDebtCountBeforeD5(firmCountForRank);
-                for (unsigned int f = 0; f < firmCountForRank; f++) {
-                    firmDebtCountBeforeD5[f] = (unsigned int)localFirmDebts[f].size();
-                }
 
                 // D.5: If accepted, firms update liquidity and loan list
                 d5ApplyFirmLoanAcceptances(
@@ -531,46 +529,12 @@ void BailInBailOut::runBenchmarkInAndOut(
                     receivedAcceptances
                 );
 
-                /*
-                if (debug) {
-                    ASSERT_AND_LOG_D(
-                        (unsigned int)mpiRank,
-                        (unsigned int)mpiSize,
-                        bankCountTotal,
-                        bankGlobalStartIndex,
-                        bankCountForRank,
-                        firmGlobalStartIndex,
-                        firmCountForRank,
-                        maxFirmLoanPercent,
-                        bankLiquidityBeforeD3,
-                        firmLiquidityBeforeD5,
-                        firmDebtCountBeforeD5,
-                        localBankLiquidity,
-                        localFirmLiquidity,
-                        localFirmDebts,
-                        bankFirmLoanOutflow,
-                        grantsThisStep,
-                        true 
-                    );
-                }
-                */
-
                 //...................PHASE E: Bank Updates..................
-
-                BailInBailOut::PreFVerifySnapshots preFSnaps;
-
-                //if (debug) {
-                //    // Snapshot before E.1 
-                //    preFSnaps.bankLiquidityBeforeE1 = localBankLiquidity;
-                //    preFSnaps.bankDebtsBeforeE1 = eLocalBankDebts;
-                //    preFSnaps.firmLiquidityBeforeE1 = localFirmLiquidity;
-                //    preFSnaps.firmDebtsBeforeE1 = localFirmDebts;
-                //}
 
                 // E.1: Repay interbank loans (bankRepayPercent % of them)
                 // The repayments are saved in a buffer
                 // The subtraction is applied instantly
-                
+
                 e1RepayInterbankLoans(
                     bankCountTotal,
                     mpiRank,
@@ -581,14 +545,6 @@ void BailInBailOut::runBenchmarkInAndOut(
                     localBankLiquidity,
                     eLocalBankDebts
                 );
-                
-                //if (debug) {
-                //    // Snapshot after E.1
-                //    preFSnaps.bankLiquidityAfterE1 = localBankLiquidity;
-                //    preFSnaps.bankDebtsAfterE1 = eLocalBankDebts;
-                //    preFSnaps.firmLiquidityAfterE1 = localFirmLiquidity;
-                //    preFSnaps.firmDebtsAfterE1 = localFirmDebts;
-                //}
 
                 // E.2: Accrue interest on outstanding loans
                 // Applied by the borrower
@@ -601,14 +557,6 @@ void BailInBailOut::runBenchmarkInAndOut(
                     minInterestRate,
                     maxInterestRate
                 );
-
-                //if (debug) {
-                //    // Snapshot after E.2
-                //    preFSnaps.bankLiquidityAfterE2 = localBankLiquidity;
-                //    preFSnaps.bankDebtsAfterE2 = eLocalBankDebts;
-                //    preFSnaps.firmLiquidityAfterE2 = localFirmLiquidity;
-                //    preFSnaps.firmDebtsAfterE2 = localFirmDebts;
-                //}
 
                 // E.3: If the bank's liquidity is negative, attempt to 
                 // borrow from another bank (by sending a request message)
@@ -630,33 +578,115 @@ void BailInBailOut::runBenchmarkInAndOut(
                 );
 
                 if (debug && step % logEvery == 0) {
-                    //// Snapshot after E.3
-                    //preFSnaps.bankLiquidityAfterE3 = localBankLiquidity;
-                    //preFSnaps.bankDebtsAfterE3 = eLocalBankDebts;
-                    //preFSnaps.firmLiquidityAfterE3 = localFirmLiquidity;
-                    //preFSnaps.firmDebtsAfterE3 = localFirmDebts;
+                    preFBankLiquidity = localBankLiquidity;
+                    preFBankDebts = eLocalBankDebts;
+                    preFBankDistressCount = bankDistressCount;
+                }
 
-                    ASSERT_AND_REPORT_PRE_F(
-                        mpiRank,
-                        mpiSize,
-                        run,
-                        step,
+                //...................PHASE F: Insolvency + Policy..................
+
+                // F.1: Insolvency check for each local bank
+                // Insolvent means bank's liquidity is smaller than the total debt
+                // If insolvent, increment the bank's distress counter
+                // If solvent, reset the distress counter to 0
+                // F.2: If insolvent and the bank has been distressed for at least
+                // interventionDelay timesteps, apply policy (once per distress episode)
+                //
+                // Policy 0 (Bail-In):
+                //  Deficit = amount needed
+                //  L = total interbank liabilities (debts)
+                //  haircutRatio = min(1.0, deficit / L)
+                //  haircutFraction = haircutRatio * bailInCoveragePercent / 100.0
+                //
+                //
+                // Policy 1 (Bail-Out, interbank only):
+                //  Each interbank loan owed by this bank is reduced multiplicatively
+                //  by (1 - haircutFraction).
+                //  Deficit = amount needed to restore solvency
+                //  Injection = Deficit * bailOutCoveragePercent / 100.0
+                //
+                //  The injection is added directly to the bank's liquidity.   
+                //
+                // After the policy is applied, mark the intervention as applied for
+                // this distress episode so it is not applied again until the bank
+                // returns to solvency.
+                //
+                // For both policies, track how much bail was granted this step
+                // (cash injected for bail-out or total debt removed for bail-in)
+                uint64_t bailMoneyThisStep = 0, graceMoneyThisStep = 0;
+                f1f2UpdateBankDistressAndApplyIntervention(
+                    bankCountForRank,
+                    interventionDelay,
+                    policy,
+                    bailInCoveragePercent,
+                    bailOutCoveragePercent,
+                    localBankLiquidity,
+                    eLocalBankDebts,
+                    bankDistressCount,
+                    bailMoneyThisStep,
+                    graceMoneyThisStep
+                );
+
+                // F.3: Update total bail money
+                // After the bail money for this timestep is finalized,
+                // update the total tracker
+                if (policy == 0) {
+                    totalBailInMoney += bailMoneyThisStep;
+                }
+                else {
+                    totalBailOutMoney += bailMoneyThisStep;
+                }
+
+                // F.6: Update total grace money
+                // After all banks have been processed, add the grace money
+                // used this timestep to the total grace money tracker
+                totalGraceMoney = graceMoneyThisStep;
+
+                if (debug && step % logEvery == 0) {
+                    JSONL_AUDIT_TIMESTEP(
+                        (unsigned int)run,
+                        (unsigned int)step,
+                        (unsigned int)policy,
+                        (unsigned int)mpiRank,
+                        (unsigned int)mpiSize,
+                        auditRunFolder,
                         bankCountTotal,
                         bankGlobalStartIndex,
                         bankCountForRank,
                         firmCountTotal,
                         firmGlobalStartIndex,
                         firmCountForRank,
+                        workerCountForRank,
+                        workerGlobalStartIndex,
+                        // Phase snapshots (A, C, D)
+                        snapPostABankLiq,
+                        snapPostCBankLiq,
+                        snapPostDBankLiq,
+                        // Pre-F snapshots
+                        preFBankLiquidity,
+                        preFBankDebts,
+                        preFBankDistressCount,
+                        // Post-F live state
                         localBankLiquidity,
                         eLocalBankDebts,
+                        bankDistressCount,
+                        // Phase F outputs
+                        bailMoneyThisStep,
+                        graceMoneyThisStep,
+                        // Firm state
                         localFirmLiquidity,
                         localFirmDebts,
                         localBankNeighbors,
+                        localFirmNeighbors,
+                        localFirmProductionCost,
+                        // Simulation parameters
                         baseSeed,
                         bankWorkerCount,
                         bankEmployeeWage,
                         wage,
                         workerCountTotal,
+                        localWorkerBankID,
+                        localWorkerFirmID,
                         minInterestRate,
                         maxInterestRate,
                         shockMultiplierMin,
@@ -664,301 +694,11 @@ void BailInBailOut::runBenchmarkInAndOut(
                         profitMultiplierMin,
                         profitMultiplierMax,
                         wageConsumptionPercent,
-                        true,
-                        true
+                        localFirmWorkforceCost
                     );
                 }
-
-                //...................PHASE F: Insolvency + Policy..................
-
-                    // F.1: Insolvency check for each local bank
-                    // Insolvent means bank's liquidity is smaller than the total debt
-                    
-                    // F.2: If insolvent, apply policy
-                    // Policy 0 (Bail-Out):
-                    //   Deficit = amount needed to restore solvency
-                    //   Injection = Deficit * bailOutCoveragePercent/100.0
-                    //
-                    // Policy 1 (Bail-In, interbank only):
-                    //   Deficit = amount needed
-                    //   L = total interbank liabilities (debts)
-                    //   haircutRatio = min(1.0, deficit / L)
-                    //   haircut fraction = haircutRatio * bailInCoveragePercent/100.0
-                    //   Each interbank loan owed by this bank gets lowered by the
-                    //   haircut fraction (multiplicatively)
-
-                    // F.3: Track bail
-                    // For both policies, track how much bail was granted this step
-
-                    // F.4: Update total bail money
-                    // After the bail money for this timestep is finalized,
-                    // update the total tracker
-
-                    // F.5: Grace money for failure
-                    // If the coverege is not 100%, the bank might fail
-                    // Find the remaining deficit after policy application
-                    // Add the deficit to the grace money tracker for this timestep
-
-                    // F.6: Update total grace money
-                    // After all banks have been rescued, add the grace money
-                    // used this time step to the total grace money tracker
-
             }
         }
     }
 
-}
-
-void BailInBailOut::ASSERT_CORRECTNESS_D(
-    unsigned int bankCountTotal,
-    unsigned short maxFirmLoanPercent,
-
-    unsigned int bankCountForRank,
-    vector<int64_t>& bankLiquidityBeforeD3,
-    vector<uint64_t>& bankFirmLoanOutflow,
-    vector<int64_t>& localBankLiquidityAfterD3,
-
-    unsigned int firmCountForRank,
-    vector<int64_t>& firmLiquidityBeforeD5,
-    vector<int64_t>& localFirmLiquidityAfterD5,
-    vector<unsigned int>& firmDebtCountBeforeD5,
-    vector<vector<DebtEntry>>& localFirmDebtsAfterD5
-) {
-    // ------------------------
-    // Basic sizing assertions
-    // ------------------------
-    assert(bankLiquidityBeforeD3.size() == bankCountForRank);
-    assert(bankFirmLoanOutflow.size() == bankCountForRank);
-    assert(localBankLiquidityAfterD3.size() == bankCountForRank);
-
-    assert(firmLiquidityBeforeD5.size() == firmCountForRank);
-    assert(localFirmLiquidityAfterD5.size() == firmCountForRank);
-    assert(firmDebtCountBeforeD5.size() == firmCountForRank);
-    assert(localFirmDebtsAfterD5.size() == firmCountForRank);
-
-    // ------------------------
-    // D.2 + D.3 checks (banks)
-    // ------------------------
-    for (unsigned int b = 0; b < bankCountForRank; b++) {
-
-        int64_t preSigned = bankLiquidityBeforeD3[b];
-        uint64_t pre = (preSigned > 0) ? (uint64_t)preSigned : 0ULL;
-
-        uint64_t capFrac = (pre * (uint64_t)maxFirmLoanPercent) / 100ULL;
-        uint64_t cap = (capFrac < pre) ? capFrac : pre;
-
-        // Outflow must not exceed cap
-        assert(bankFirmLoanOutflow[b] <= cap);
-
-        // Liquidity after D.3 must match exactly
-        int64_t expectedAfter = bankLiquidityBeforeD3[b] - (int64_t)bankFirmLoanOutflow[b];
-        assert(localBankLiquidityAfterD3[b] == expectedAfter);
-    }
-
-    // ------------------------
-    // D.5 checks (firms)
-    // ------------------------
-    for (unsigned int f = 0; f < firmCountForRank; f++) {
-
-        int64_t deltaCash = localFirmLiquidityAfterD5[f] - firmLiquidityBeforeD5[f];
-        // Firms should not lose cash in D.5 (only acceptances add cash)
-        assert(deltaCash >= 0);
-
-        unsigned int beforeCount = firmDebtCountBeforeD5[f];
-        unsigned int afterCount = (unsigned int)localFirmDebtsAfterD5[f].size();
-        assert(afterCount >= beforeCount);
-
-        uint64_t sumNewDebt = 0;
-
-        for (unsigned int i = beforeCount; i < afterCount; i++) {
-            DebtEntry& e = localFirmDebtsAfterD5[f][i];
-
-            // lender bank id must be a valid GLOBAL bank id
-            assert(e.lenderBankGlobalId < bankCountTotal);
-
-            sumNewDebt += e.amount;
-        }
-
-        // New debt recorded must exactly match new cash received
-        assert(sumNewDebt == (uint64_t)deltaCash);
-    }
-}
-
-
-void BailInBailOut::ASSERT_AND_LOG_D(
-    unsigned int mpiRank,
-    unsigned int mpiSize,
-
-    unsigned int bankCountTotal,
-    unsigned int bankGlobalStartIndex,
-    unsigned int bankCountForRank,
-
-    unsigned int firmGlobalStartIndex,
-    unsigned int firmCountForRank,
-
-    unsigned short maxFirmLoanPercent,
-
-    // Snapshots you took
-    vector<int64_t>& bankLiquidityBeforeD3,
-    vector<int64_t>& firmLiquidityBeforeD5,
-    vector<unsigned int>& firmDebtCountBeforeD5,
-
-    // Current state after D.3 and D.5
-    vector<int64_t>& localBankLiquidity,
-    vector<int64_t>& localFirmLiquidity,
-    vector<vector<DebtEntry>>& localFirmDebts,
-
-    // Per-step computed
-    vector<uint64_t>& bankFirmLoanOutflow,
-
-    // Optional: edges produced by banks (see notes below)
-    vector<DDebugGrantEdge>& grantsThisStep,
-
-    // Toggle: print every grant edge (can be huge)
-    bool printEdges
-) {
-    // ------------------------
-    // Sanity sizing
-    // ------------------------
-    if (bankLiquidityBeforeD3.size() != bankCountForRank) {
-        printf("[Rank %u] ERROR: bankLiquidityBeforeD3.size=%u bankCountForRank=%u\n",
-            mpiRank, (unsigned int)bankLiquidityBeforeD3.size(), bankCountForRank);
-        return;
-    }
-    if (firmLiquidityBeforeD5.size() != firmCountForRank) {
-        printf("[Rank %u] ERROR: firmLiquidityBeforeD5.size=%u firmCountForRank=%u\n",
-            mpiRank, (unsigned int)firmLiquidityBeforeD5.size(), firmCountForRank);
-        return;
-    }
-
-    // ------------------------
-    // Summaries
-    // ------------------------
-    uint64_t totalOutflowLocal = 0;
-    for (unsigned int b = 0; b < bankCountForRank; b++) {
-        totalOutflowLocal += bankFirmLoanOutflow[b];
-    }
-
-    uint64_t totalBorrowedLocal = 0;
-    for (unsigned int f = 0; f < firmCountForRank; f++) {
-        int64_t delta = localFirmLiquidity[f] - firmLiquidityBeforeD5[f];
-        if (delta > 0) totalBorrowedLocal += (uint64_t)delta;
-    }
-
-    printf("\n==================== D DEBUG (Rank %u/%u) ====================\n",
-        mpiRank, mpiSize);
-    printf("Banks owned: [%u .. %u)\n", bankGlobalStartIndex, bankGlobalStartIndex + bankCountForRank);
-    printf("Firms owned: [%u .. %u)\n", firmGlobalStartIndex, firmGlobalStartIndex + firmCountForRank);
-    printf("Total bank outflow this step (local): %llu\n", (uint64_t)totalOutflowLocal);
-    printf("Total firm borrowed this step (local): %llu\n", (uint64_t)totalBorrowedLocal);
-    printf("Grant edges recorded (local): %u\n", (unsigned int)grantsThisStep.size());
-
-    // ------------------------
-    // Per-bank detail
-    // ------------------------
-    printf("\n-- Banks (local detail) --\n");
-    for (unsigned int b = 0; b < bankCountForRank; b++) {
-        unsigned int bankGlobalId = bankGlobalStartIndex + b;
-
-        int64_t preSigned = bankLiquidityBeforeD3[b];
-        uint64_t pre = (preSigned > 0) ? (uint64_t)preSigned : 0ULL;
-
-        uint64_t capFrac = (pre * (uint64_t)maxFirmLoanPercent) / 100ULL;
-        uint64_t cap = (capFrac < pre) ? capFrac : pre;
-
-        int64_t expectedAfter = bankLiquidityBeforeD3[b] - (int64_t)bankFirmLoanOutflow[b];
-        int64_t actualAfter = localBankLiquidity[b];
-
-        printf("BankGID=%u pre=%lld cap=%llu outflow=%llu after=%lld expectedAfter=%lld\n",
-            bankGlobalId,
-            (int64_t)bankLiquidityBeforeD3[b],
-            (uint64_t)cap,
-            (uint64_t)bankFirmLoanOutflow[b],
-            (int64_t)actualAfter,
-            (int64_t)expectedAfter
-        );
-
-        // Assertions with prints
-        if (bankFirmLoanOutflow[b] > cap) {
-            printf("[Rank %u] FAIL: BankGID=%u outflow=%llu > cap=%llu\n",
-                mpiRank, bankGlobalId,
-                (uint64_t)bankFirmLoanOutflow[b],
-                (uint64_t)cap
-            );
-        }
-        if (actualAfter != expectedAfter) {
-            printf("[Rank %u] FAIL: BankGID=%u liquidityAfter=%lld != expected=%lld\n",
-                mpiRank, bankGlobalId, (int64_t)actualAfter, (int64_t)expectedAfter);
-        }
-        if (actualAfter < 0) {
-            printf("[Rank %u] WARN: BankGID=%u liquidity negative after D3 (%lld)\n",
-                mpiRank, bankGlobalId, (int64_t)actualAfter);
-        }
-    }
-
-    // ------------------------
-    // Per-firm detail
-    // ------------------------
-    printf("\n-- Firms (local detail) --\n");
-    for (unsigned int f = 0; f < firmCountForRank; f++) {
-        unsigned int firmGlobalId = firmGlobalStartIndex + f;
-
-        int64_t pre = firmLiquidityBeforeD5[f];
-        int64_t post = localFirmLiquidity[f];
-        int64_t deltaCash = post - pre;
-
-        unsigned int beforeCount = firmDebtCountBeforeD5[f];
-        unsigned int afterCount = (unsigned int)localFirmDebts[f].size();
-
-        uint64_t sumNewDebt = 0;
-        for (unsigned int i = beforeCount; i < afterCount; i++) {
-            sumNewDebt += localFirmDebts[f][i].amount;
-        }
-
-        printf("FirmGID=%u pre=%lld cashReceived=%lld newDebtCount=%u newDebtSum=%llu post=%lld\n",
-            firmGlobalId,
-            (int64_t)pre,
-            (int64_t)deltaCash,
-            (unsigned int)(afterCount - beforeCount),
-            (uint64_t)sumNewDebt,
-            (int64_t)post
-        );
-
-        if (deltaCash < 0) {
-            printf("[Rank %u] FAIL: FirmGID=%u cashReceived negative (%lld)\n",
-                mpiRank, firmGlobalId, (int64_t)deltaCash);
-        }
-        if (sumNewDebt != (uint64_t)((deltaCash > 0) ? deltaCash : 0)) {
-            printf("[Rank %u] FAIL: FirmGID=%u newDebtSum=%llu != cashReceived=%lld\n",
-                mpiRank, firmGlobalId,
-                (uint64_t)sumNewDebt,
-                (int64_t)deltaCash
-            );
-        }
-        // lenderBankGlobalId range checks for newly added debts
-        for (unsigned int i = beforeCount; i < afterCount; i++) {
-            unsigned int lender = localFirmDebts[f][i].lenderBankGlobalId;
-            if (lender >= bankCountTotal) {
-                printf("[Rank %u] FAIL: FirmGID=%u newDebt lenderBankGlobalId out of range: %u\n",
-                    mpiRank, firmGlobalId, lender);
-            }
-        }
-    }
-
-    // ------------------------
-    // Optional: print every grant edge (can be huge)
-    // ------------------------
-    if (printEdges) {
-        printf("\n-- Grant edges (local recorded) --\n");
-        for (unsigned int i = 0; i < grantsThisStep.size(); i++) {
-            DDebugGrantEdge& e = grantsThisStep[i];
-            printf("Grant: firmGID=%u bankGID=%u amount=%llu\n",
-                e.firmGlobalId,
-                e.lenderBankGlobalId,
-                (uint64_t)e.amountGranted
-            );
-        }
-    }
-
-    printf("==============================================================\n\n");
 }

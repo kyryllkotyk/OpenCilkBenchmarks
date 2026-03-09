@@ -169,12 +169,7 @@ void BailInBailOut::d2ProcessFirmLoanRequests(
 
     // Output buffers
     vector<vector<d2FirmLoanAcceptance>>& firmLoanAcceptancesToRank,
-    vector<uint64_t>& bankFirmLoanOutflow,
-
-    // Debug output 
-    vector<DDebugGrantEdge>* grantsThisStep,
-    // Debug flag
-    bool debug
+    vector<uint64_t>& bankFirmLoanOutflow
 ) {
     // Reset outputs for this step
     for (unsigned int r = 0; r < mpiSize; r++) {
@@ -261,16 +256,6 @@ void BailInBailOut::d2ProcessFirmLoanRequests(
                     grant
                 }
             );
-
-            if (debug) {
-                grantsThisStep->push_back(
-                    DDebugGrantEdge{
-                        req.firmGlobalId,
-                        req.lenderBankGlobalId,
-                        grant
-                    }
-                );
-            }
 
             // Track how much this bank is lending this step (apply in D.3)
             bankFirmLoanOutflow[localBank] += grant;
@@ -973,7 +958,7 @@ void BailInBailOut::e3BorrowInterbankIfNegativeLiquidity(
     }
 
     // ------------------------------------------------------------------
-    // Direct sparse exchange for acceptances (same mechanism as requests)
+    // Direct sparse exchange for acceptances (same as requests)
     // ------------------------------------------------------------------
 
     static MPI_Datatype accType = e3MakeInterbankLoanAcceptanceType();
@@ -1009,5 +994,207 @@ void BailInBailOut::e3BorrowInterbankIfNegativeLiquidity(
             acc.lenderBankGlobalId,
             acc.amountGranted
             });
+    }
+}
+
+void BailInBailOut::f1f2UpdateBankDistressAndApplyIntervention(
+    unsigned int bankCountForRank,
+    unsigned int interventionDelay,
+    unsigned int policy,
+    unsigned short bailInCoveragePercent,
+    unsigned short bailOutCoveragePercent,
+    vector<int64_t>& localBankLiquidity,
+    vector<vector<DebtEntry>>& localBankDebts,
+    vector<unsigned int>& bankDistressCount,
+    uint64_t& bailMoneyThisStep,
+    uint64_t& graceMoneyThisStep
+) {
+    bailMoneyThisStep = 0;
+    graceMoneyThisStep = 0;
+
+
+    for (unsigned int localBank = 0; localBank < bankCountForRank; localBank++) {
+        vector<DebtEntry>& debts = localBankDebts[localBank];
+        // Get the total debts of this bank
+        uint64_t totalDebtBefore = sumDebtU64(debts);
+
+        bool isInsolvent = localBankLiquidity[localBank] < totalDebtBefore;
+
+        // F.1: Update distress counter
+        if (isInsolvent) {
+            bankDistressCount[localBank]++;
+        }
+        // Reset if it's solvent
+        else {
+            bankDistressCount[localBank] = 0;
+            continue;
+        }
+
+        // F.2: Apply intervention every interventionDelay distress timesteps
+        unsigned int distressCount = bankDistressCount[localBank];
+
+        bool shouldIntervene =
+            (distressCount >= interventionDelay) &&
+            (distressCount % interventionDelay == 0);
+        // If it's not time to intervene yet, don't proceed
+        if (!shouldIntervene) {
+            continue;
+        }
+
+        uint64_t deficitBefore = totalDebtBefore - localBankLiquidity[localBank];
+
+        // Policy 0 -> Bail-In
+        if (policy == 0) {
+            // Check if there is some debt
+            if (totalDebtBefore > 0) {
+                uint64_t targetDebtRemoval = 
+                    percentFloorU64(deficitBefore, bailInCoveragePercent);
+
+                // If the target removal is greater than what is needed,
+                // only cover the total debt 
+                if (targetDebtRemoval > totalDebtBefore) {
+                    targetDebtRemoval = totalDebtBefore;
+                }
+
+                if (targetDebtRemoval > 0) {
+                    const size_t debtCount = debts.size();
+
+                    // Amount of reduction applied to each debt entry
+                    vector<uint64_t> debtReduction(debtCount, 0);
+                    // Remainder used to distribute leftover reductions
+                    vector<uint64_t> remainderByDebt(debtCount, 0);
+                    // Total reduction assigned during the allocation pass
+                    uint64_t assignedReduction = 0;
+
+                    // Compute proportional reduction for each debt based on its share
+                    // of total interbank liabilities.
+                    for (size_t i = 0; i < debtCount; i++) {
+
+                        // Skip debts that are already zero
+                        if (debts[i].amount == 0) {
+                            continue;
+                        }
+
+                        // Use 128 bit to avoid overflow when multiplying
+                        unsigned __int128 scaled =
+                            (unsigned __int128)targetDebtRemoval *
+                            (unsigned __int128)debts[i].amount;
+
+                        // Determine the proportional reduction
+                        uint64_t reduction =
+                            (uint64_t)(scaled / totalDebtBefore);
+                        // Store remainder for distribution
+                        uint64_t remainder =
+                            (uint64_t)(scaled % totalDebtBefore);
+
+                        // Never remove more than the actual debt amount
+                        if (reduction > debts[i].amount) {
+                            reduction = debts[i].amount;
+                        }
+
+                        debtReduction[i] = reduction;
+                        remainderByDebt[i] = remainder;
+                        assignedReduction += reduction;
+                    }
+
+                    // Remaining reduction still to be assigned
+                    uint64_t leftover = targetDebtRemoval - assignedReduction;
+
+                    if (leftover > 0) {
+                        // Order of debts eligible for receiving the leftovers
+                        vector<size_t> order;
+                        order.reserve(debtCount);
+                        // Only debts that still have remaining balance are eligible
+                        for (size_t i = 0; i < debtCount; i++) {
+                            if (debts[i].amount > debtReduction[i]) {
+                                order.push_back(i);
+                            }
+                        }
+
+                        // Sort by remainder (largest first) 
+                        sort(
+                            order.begin(),
+                            order.end(),
+                            [&](size_t a, size_t b) {
+                                if (remainderByDebt[a] != remainderByDebt[b]) {
+                                    return remainderByDebt[a] > remainderByDebt[b];
+                                }
+                                if (debts[a].lenderBankGlobalId !=
+                                    debts[b].lenderBankGlobalId) {
+                                    return debts[a].lenderBankGlobalId <
+                                        debts[b].lenderBankGlobalId;
+                                }
+                                return a < b;
+                            }
+                        );
+
+                        // Distribute leftover reduction one unit at a time
+                        for (size_t k = 0; k < order.size() && leftover > 0; k++) {
+                            size_t i = order[k];
+
+                            if (debts[i].amount > debtReduction[i]) {
+                                debtReduction[i] += 1;
+                                leftover -= 1;
+                            }
+                        }
+                    }
+
+                    // Apply the reductions to the actual debt entries
+                    uint64_t actuallyRemoved = 0;
+
+                    for (size_t i = 0; i < debtCount; i++) {
+                        uint64_t reduction = debtReduction[i];
+
+                        if (reduction == 0) {
+                            continue;
+                        }
+
+                        debts[i].amount -= reduction;
+                        actuallyRemoved += reduction;
+                    }
+
+                    // Remove any debts that were fully eliminated
+                    for (size_t i = 0; i < debts.size(); ) {
+                        if (debts[i].amount == 0) {
+                            debts[i] = debts.back();
+                            debts.pop_back();
+                        }
+                        else {
+                            i++;
+                        }
+                    }
+
+                    // Track total debt removed by bail-in this timestep
+                    bailMoneyThisStep += actuallyRemoved;
+                }
+            }
+        }
+
+        // Policy 1 -> Bail-Out
+        else {
+            if (bailOutCoveragePercent > 0) {
+                // Find the injection amount as percentage of deficit
+                uint64_t injection =
+                    percentFloorU64(deficitBefore, bailOutCoveragePercent);
+                // Add that cash
+                localBankLiquidity[localBank] += (int64_t)injection;
+                // Track the liquidity 
+                bailMoneyThisStep += injection;
+            }
+        }
+
+        // F.5: Grace money if still insolvent after intervention
+        uint64_t totalDebtAfter = sumDebtU64(debts);
+
+        bool stillInsolvent =
+            ((long double)localBankLiquidity[localBank] < (long double)totalDebtAfter);
+
+        if (stillInsolvent) {
+            uint64_t deficitAfter =
+                (uint64_t)((long double)totalDebtAfter -
+                    (long double)localBankLiquidity[localBank]);
+
+            graceMoneyThisStep += deficitAfter;
+        }
     }
 }

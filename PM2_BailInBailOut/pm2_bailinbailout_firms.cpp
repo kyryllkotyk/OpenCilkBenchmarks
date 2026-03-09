@@ -373,4 +373,3 @@ void BailInBailOut::a6RequestFirmLoans(
     }
 }
 
-

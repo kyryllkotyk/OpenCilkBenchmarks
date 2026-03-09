@@ -7,6 +7,10 @@
 #include <cassert>
 #include <limits>
 #include <cstdio> // For debug
+#include <ctime>
+#include <fstream>
+#include <unordered_set>
+#include <cstring>
 
 #include <mpi.h>
 
@@ -29,7 +33,7 @@ public:
     * @details This function runs the complete simulation of a financial system
     * containing banks, firms, and workers. The simulation is distributed across
     * MPI ranks, where each rank owns a part of the workers, firms, and banks.
-    * The benchmark models firm production, worker wage deposits, 
+    * The benchmark models firm production, worker wage deposits,
     * bank lending, interbank loans, and financial distress policies
     *
     * For each run, two policy modes are executed:
@@ -52,9 +56,9 @@ public:
     * Irregular message passing (loan requests and acceptances)
     * Graph-based communication (interbank graph network)
     * Distributed state updates
-    * Deterministic randomization 
+    * Deterministic randomization
     *
-    * All randomness is deterministically seeded so that identical results are 
+    * All randomness is deterministically seeded so that identical results are
     * produced regardless of MPI system configuration.
     *
     * @param runs Number of independent simulation runs to perform
@@ -99,17 +103,20 @@ public:
     * can be loaned to another bank during interbank lending
     * @param maxFirmLoanPercent Maximum percentage of a bank's liquidity that may
     * be lent to firms in a single timestep
-    * @param firmLenderDegree Number of banks each firm is 
+    * @param firmLenderDegree Number of banks each firm is
     * connected to in the firm-bank graph
     * @param firmRepayPercent Percentage of outstanding firm debt repaid each
     * timestep when liquidity permits
     * @param bankRepayPercent Percentage of outstanding interbank debt repaid
     * each timestep when liquidity permits
     *
-    * @param bailInCoveragePercent Percentage of a bank’s debts that
+    * @param interventionDelay How many timesteps to wait before applying
+    * Bail-In or Bail-Out policy to the insolvent bank
+    *
+    * @param bailInCoveragePercent Percentage of a bank's debts that
     * will be forgiven during a bail-in intervention
     *
-    * @param bailOutCoveragePercent Percentage of a bank’s deficit covered by
+    * @param bailOutCoveragePercent Percentage of a bank's deficit covered by
     * external liquidity injection during a bail-out intervention
     *
     * @param debug Enables detailed correctness verification and diagnostic
@@ -154,6 +161,8 @@ public:
         unsigned short firmLenderDegree,
         unsigned short firmRepayPercent,
         unsigned short bankRepayPercent,
+
+        unsigned int interventionDelay,
 
         /* Bail-In Parameters */
         unsigned short bailInCoveragePercent,
@@ -204,9 +213,9 @@ private:
     * @brief Deterministically selects an index for a worker
     *
     * @details
-    * Uses a seeded random generator to assign a worker to an entity 
+    * Uses a seeded random generator to assign a worker to an entity
     * (bank or firm). The selection depends only on the base
-    * seed, the worker's global ID, and the provided stream tag. 
+    * seed, the worker's global ID, and the provided stream tag.
     * The assignment must remain identical regardless of system configuration
     *
     * @param baseSeed Base random seed for the simulation.
@@ -225,10 +234,10 @@ private:
     /*
     * @brief Generates a deterministic mixed seed from multiple parameters
     *
-    * @details 
+    * @details
     * Combines the base seed with run number, timestep, entity ID, and a stream
     * identifier to produce a unique seed. The resulting seed is then passed
-    * through a SplitMix64 
+    * through a SplitMix64
     *
     * This is to make sure that all random values in the simulation are fully
     * independent of the system configuration
@@ -237,7 +246,7 @@ private:
     * @param run Current run index
     * @param timestep Current timestep index
     * @param globalId Global ID of the entity associated with the seed
-    * @param streamTag RNG stream identifier 
+    * @param streamTag RNG stream identifier
     * @return Mixed 64 bit seed value
     */
     static uint64_t makeSeed(
@@ -272,7 +281,7 @@ private:
     **************************************************************************/
 
     //===============================STRUCTURES================================
-    
+
     //NOTE:: This struct is also used for firms. 
     struct DebtEntry {
         // Global bank ID
@@ -302,7 +311,7 @@ private:
 
         const unsigned int initialBankLiquidity,
         const unsigned int initialFirmLiquidity,
-        const unsigned int initialProductionCost,  
+        const unsigned int initialProductionCost,
         const unsigned int wage,
 
         unsigned short& wageConsumptionPercent,
@@ -320,6 +329,7 @@ private:
         unsigned short& firmLenderDegree,
         unsigned short& firmRepayPercent,
         unsigned short& bankRepayPercent,
+        unsigned int interventionDelay,
 
         unsigned short& bailInCoveragePercent,
         unsigned short& bailOutCoveragePercent
@@ -364,27 +374,110 @@ private:
         const vector<BailInBailOut::DebtEntry>& debts
     );
 
-    void ASSERT_AND_REPORT_PRE_F(
+    static void auditEmitBankRecord(
+        std::ostringstream& out,
+        const char* recordType,
+        unsigned int gB,
+        unsigned int mpiRank,
+        int64_t liq,
+        const std::vector<BailInBailOut::DebtEntry>& debts,
+        unsigned int distressCount,
+        const std::vector<unsigned int>& neighbors,
+        unsigned int bankCountTotal,
+        unsigned short interestRate,
+        int64_t employeeWageCost,
+        uint64_t seedInterest,
+        uint64_t seedBankGraph,
+        uint64_t xo0,
+        uint64_t xo1,
+        uint64_t xo2,
+        uint64_t xo3
+    );
+
+    static std::string auditBuildRunFolder(
         unsigned int mpiRank,
         unsigned int mpiSize,
         unsigned int run,
+        unsigned int policy
+    );
+
+    /*
+    * @brief Exhaustive per-timestep JSONL audit covering phase snapshots,
+    * pre-F state, post-F state, and global invariants in a single file.
+    *
+    * Caller responsibilities (in order):
+    *   1. After E.3, snapshot snapPostABankLiq, snapPostCBankLiq, snapPostDBankLiq
+    *      from the corresponding points earlier in the step (see run.cpp).
+    *   2. Snapshot preFBankLiquidity, preFBankDebts, preFBankDistressCount
+    *      BEFORE calling f1f2UpdateBankDistressAndApplyIntervention.
+    *   3. Call this function AFTER f1f2 completes, passing all snapshots,
+    *      the live post-F state, and the bail/grace money outputs.
+    *
+    * Output location:
+    *   DebugFiles/BIBO_HHMMSSmmm_DDMMYYYY_RUN<6-padded>_BAILIN|BAILOUT/<6-padded>_BAILIN|BAILOUT.jsonl
+    *   runFolder is computed once per (run, policy) via auditBuildRunFolder
+    *   and passed in by the caller so all timesteps share the same folder.
+    *
+    * Written by rank 0 only. Output is identical regardless of rank count.
+    *
+    * Record types emitted (sorted by type order, then gid ascending):
+    *   "bank_snap_post_a" -- per-bank liquidity after A.5.5 employee wages
+    *   "bank_snap_post_c" -- per-bank liquidity after c1SendMoneyToBanks
+    *   "bank_snap_post_d" -- per-bank liquidity after D.3 firm loan outflows
+    *   "bank_pre_f"       -- full per-bank state before phase F
+    *   "bank_post_f"      -- full per-bank state after phase F
+    *   "firm"             -- per-firm state (F does not touch firms)
+    *   "worker"           -- per-worker assignments and deposit amount
+    *   "phase_f_summary"  -- per-bank F outcome: liq/debt deltas, intervention flag
+    *   "global"           -- phase snapshot sums, post-F totals, pre-F totals,
+    *                         bail/grace money, integrity violations, pass/fail
+    *
+    * NOTE: This function was created by Claude Sonnet 4.6 to verify the implementation
+    */
+    void JSONL_AUDIT_TIMESTEP(
+        unsigned int run,
         unsigned int timestep,
+        unsigned int policy,
+        unsigned int mpiRank,
+        unsigned int mpiSize,
+        const std::string& runFolder,
         unsigned int bankCountTotal,
         unsigned int bankGlobalStartIndex,
         unsigned int bankCountForRank,
         unsigned int firmCountTotal,
         unsigned int firmGlobalStartIndex,
         unsigned int firmCountForRank,
+        unsigned int workerCountForRank,
+        unsigned int workerGlobalStartIndex,
+        // Mid-step phase snapshots (bank liquidity only, debts unchanged at A/C/D)
+        const vector<int64_t>& snapPostABankLiq,    // after A.5.5 employee wages
+        const vector<int64_t>& snapPostCBankLiq,    // after c1SendMoneyToBanks
+        const vector<int64_t>& snapPostDBankLiq,    // after D.3 firm loan outflows
+        // Pre-F snapshots
+        const vector<int64_t>& preFBankLiquidity,
+        const vector<vector<DebtEntry>>& preFBankDebts,
+        const vector<unsigned int>& preFBankDistressCount,
+        // Post-F live state
         vector<int64_t>& localBankLiquidity,
         vector<vector<DebtEntry>>& localBankDebts,
+        vector<unsigned int>& postFBankDistressCount,
+        // Phase F outputs
+        uint64_t bailMoneyThisStep,
+        uint64_t graceMoneyThisStep,
+        // Firm state
         vector<int64_t>& localFirmLiquidity,
         vector<vector<DebtEntry>>& localFirmDebts,
         vector<vector<unsigned int>>& localBankNeighbors,
+        vector<vector<unsigned int>>& localFirmNeighbors,
+        vector<uint64_t>& localFirmProductionCost,
+        // Simulation parameters
         uint64_t baseSeed,
         unsigned int bankWorkerCount,
         unsigned int bankEmployeeWage,
         unsigned int wage,
         unsigned int workerCountTotal,
+        const vector<unsigned short>& localWorkerBankID,
+        const vector<unsigned short>& localWorkerFirmID,
         unsigned short minInterestRate,
         unsigned short maxInterestRate,
         unsigned short shockMultiplierMin,
@@ -392,8 +485,7 @@ private:
         unsigned short profitMultiplierMin,
         unsigned short profitMultiplierMax,
         unsigned short wageConsumptionPercent,
-        bool printAllBanks,
-        bool hardAbortOnFailure
+        const vector<uint64_t>& localFirmWorkforceCost
     );
 
     /**************************************************************************
@@ -640,6 +732,19 @@ private:
         vector<vector<unsigned int>>& localBankNeighbors,
         vector<int64_t>& localBankLiquidity,
         vector<vector<DebtEntry>>& localBankDebts
+    );
+
+    void f1f2UpdateBankDistressAndApplyIntervention(
+        unsigned int bankCountForRank,
+        unsigned int interventionDelay,
+        unsigned int policy,
+        unsigned short bailInCoveragePercent,
+        unsigned short bailOutCoveragePercent,
+        vector<int64_t>& localBankLiquidity,
+        vector<vector<DebtEntry>>& localBankDebts,
+        vector<unsigned int>& bankDistressCount,
+        uint64_t& bailMoneyThisStep,
+        uint64_t& graceMoneyThisStep
     );
 
     /**************************************************************************
