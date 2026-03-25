@@ -44,6 +44,19 @@ void BailInBailOut::runBenchmarkInAndOut(
     unsigned short shockMultiplierMax,
     unsigned short minInterestRate,
     unsigned short maxInterestRate,
+    unsigned short firmShockMinPercent,
+    unsigned short firmShockMaxPercent,
+    unsigned short firmProfitMinPercent,
+    unsigned short firmProfitMaxPercent,
+    unsigned short firmOperatingCostMinPercent,
+    unsigned short firmOperatingCostMaxPercent,
+    unsigned short firmShockProfitMultiplierMinPercent,
+    unsigned short firmShockProfitMultiplierMaxPercent,
+    unsigned short firmInitialLiquidityMultiplierMinPercent,
+    unsigned short firmInitialLiquidityMultiplierMaxPercent,
+    unsigned short firmRareEventProbabilityPercent,
+    unsigned short firmRareEventImpactMinPercent,
+    unsigned short firmRareEventImpactMaxPercent,
 
     /* Banking Interaction Parameters */
     unsigned short interbankDensity,
@@ -75,6 +88,13 @@ void BailInBailOut::runBenchmarkInAndOut(
         initialFirmLiquidity, initialProductionCost, wage,
         wageConsumptionPercent, profitMultiplierMin, profitMultiplierMax,
         shockMultiplierMin, shockMultiplierMax, minInterestRate, maxInterestRate,
+        firmShockMinPercent, firmShockMaxPercent,
+        firmProfitMinPercent, firmProfitMaxPercent,
+        firmOperatingCostMinPercent, firmOperatingCostMaxPercent,
+        firmShockProfitMultiplierMinPercent, firmShockProfitMultiplierMaxPercent,
+        firmInitialLiquidityMultiplierMinPercent, firmInitialLiquidityMultiplierMaxPercent,
+        firmRareEventProbabilityPercent,
+        firmRareEventImpactMinPercent, firmRareEventImpactMaxPercent,
         interbankDensity, maxInterbankLenderSamplingK, maxInterbankLoanPercent,
         maxFirmLoanPercent, firmLenderDegree, firmRepayPercent,
         bankRepayPercent, interventionDelay, bailInCoveragePercent, bailOutCoveragePercent)) {
@@ -175,10 +195,28 @@ void BailInBailOut::runBenchmarkInAndOut(
             vector<unsigned int> bankDistressCount(bankCountForRank, 0);
 
             // Firm Arrays
+            vector<unsigned short> localFirmShockMinPercent(
+                firmCountForRank, 0);
+            vector<unsigned short> localFirmShockMaxPercent(
+                firmCountForRank, 0);
+            vector<unsigned short> localFirmProfitMinPercent(
+                firmCountForRank, 0);
+            vector<unsigned short> localFirmProfitMaxPercent(
+                firmCountForRank, 0);
+            vector<unsigned short> localFirmOperatingCostPercent(
+                firmCountForRank, 0);
+            vector<unsigned short> localFirmShockProfitMultiplierPercent(
+                firmCountForRank, 0);
+            vector<unsigned short> localFirmInitialLiquidityMultiplierPercent(
+                firmCountForRank, 0);
+            vector<unsigned short> localFirmRareEventImpactPercent(
+                firmCountForRank, 0);
             vector<int64_t> localFirmLiquidity(firmCountForRank,
                 initialFirmLiquidity);
             vector<uint64_t> localFirmProductionCost(firmCountForRank,
                 initialProductionCost);
+            vector<unsigned short> localFirmRareEventRollPercent(firmCountForRank);
+            vector<bool> localFirmRareEventIsPositive(firmCountForRank);
             vector<vector<unsigned int>> localFirmNeighbors(firmCountForRank);
             vector<vector<DebtEntry>> localFirmDebts(firmCountForRank);
             vector<vector<FirmLoanRequest>> firmLoanRequestsToRank(mpiSize);
@@ -337,66 +375,128 @@ void BailInBailOut::runBenchmarkInAndOut(
 
                 //..............PHASE A: Firms and Worker Updates..............
 
+                // At the start of the phase, calculate all random values
+                a0BuildFirmPhaseAParameters(
+                    baseSeed,
+                    (unsigned int)run,
+                    (unsigned int)step,
+                    firmGlobalStartIndex,
+                    firmCountForRank,
+
+                    firmShockMinPercent,
+                    firmShockMaxPercent,
+                    firmProfitMinPercent,
+                    firmProfitMaxPercent,
+                    firmOperatingCostMinPercent,
+                    firmOperatingCostMaxPercent,
+                    firmShockProfitMultiplierMinPercent,
+                    firmShockProfitMultiplierMaxPercent,
+                    firmRareEventImpactMinPercent,
+                    firmRareEventImpactMaxPercent,
+
+                    STREAM_FIRM_SHOCK_PERCENT,
+                    STREAM_FIRM_PROFIT_PERCENT,
+                    STREAM_FIRM_OPERATING_COST_PERCENT,
+                    STREAM_FIRM_SHOCK_PROFIT_MULTIPLIER_PERCENT,
+                    STREAM_FIRM_RARE_EVENT_PROBABILITY,
+                    STREAM_FIRM_RARE_EVENT_IMPACT_PERCENT,
+                    STREAM_FIRM_RARE_EVENT_SIGN,
+
+                    localFirmShockMinPercent,
+                    localFirmShockMaxPercent,
+                    localFirmProfitMinPercent,
+                    localFirmProfitMaxPercent,
+                    localFirmOperatingCostPercent,
+                    localFirmShockProfitMultiplierPercent,
+                    localFirmRareEventRollPercent,
+                    localFirmRareEventImpactPercent,
+                    localFirmRareEventIsPositive
+                );
+
                 // Firms compute loans before worker deposits are settled,
                 // which may cause them to miss out on a bank they otherwise
-                // could've used as a candidate, modeling short-term 
+                // could've used as a candidate, modeling short-term
                 // overreaction to liquidity shocks
                 vector<int64_t> bankIncomingFromFirmRepay(bankCountTotal, 0);
                 for (int f = 0; f < firmCountForRank; f++) {
+                    unsigned int firmGlobalId = f + firmGlobalStartIndex;
+
                     // A.1: Find the random shock value
-                    uint64_t shockSeed = makeSeed(
+                    uint64_t shockSignSeed = makeSeed(
                         baseSeed,
                         run,
                         step,
-                        f + firmGlobalStartIndex,
-                        STREAM_SHOCK_GENERATION
+                        firmGlobalId,
+                        STREAM_SHOCK_SIGN
                     );
 
-                    short shock = randomInRangeFromSeed(
-                        shockSeed,
-                        shockMultiplierMin,
-                        shockMultiplierMax
+                    short shock = (short)randomPercentFromStream(
+                        baseSeed,
+                        run,
+                        step,
+                        firmGlobalId,
+                        STREAM_SHOCK_GENERATION,
+                        localFirmShockMinPercent[f],
+                        localFirmShockMaxPercent[f]
                     );
 
-                    bool isNegative = (shockSeed & 1ULL);
-
-                    if (isNegative) {
+                    if (shockSignSeed & 1ULL) {
                         shock *= -1;
                     }
 
-                    // A.2: Affect the production cost using the shock value
+                    shock = (short)(((int)shock *
+                        (int)localFirmShockProfitMultiplierPercent[f]) / 100);
 
-                    localFirmProductionCost[f] *= (1 + (shock / 100.0));
+                    // A.2: Affect the production cost using the shock value
+                    localFirmProductionCost[f] = (uint64_t)(
+                        localFirmProductionCost[f] * (1.0 + (shock / 100.0))
+                        );
 
                     // A.3: Find the random profit multiplier and affect profit
-
-                    uint64_t profitSeed = makeSeed(
+                    short profitMultiplier = (short)randomPercentFromStream(
                         baseSeed,
                         run,
                         step,
-                        f + firmGlobalStartIndex,
-                        STREAM_PROFIT_MULTIPLIER_GENERATION
+                        firmGlobalId,
+                        STREAM_PROFIT_MULTIPLIER_GENERATION,
+                        localFirmProfitMinPercent[f],
+                        localFirmProfitMaxPercent[f]
                     );
 
-                    short profitMultiplier = randomInRangeFromSeed(
-                        profitSeed,
-                        profitMultiplierMin,
-                        profitMultiplierMax
+                    profitMultiplier = (short)(((int)profitMultiplier *
+                        (int)localFirmShockProfitMultiplierPercent[f]) / 100);
+
+                    int64_t operatingCost = (int64_t)percentFloorU64(
+                        localFirmProductionCost[f],
+                        localFirmOperatingCostPercent[f]
                     );
 
-                    // A.4: Apply profit and take away workforce cost
+                    // A.4: Apply profit and take away workforce cost + operating cost
+                    localFirmLiquidity[f] +=
+                        (int64_t)(localFirmProductionCost[f] * (profitMultiplier / 100.0)) -
+                        (int64_t)localFirmWorkforceCost[f] -
+                        operatingCost;
 
-                    localFirmLiquidity[f] += localFirmProductionCost[f] *
-                        (profitMultiplier / 100.0) - localFirmWorkforceCost[f];
+                    // A.4.5: Apply rare event if triggered this timestep
+                    if (localFirmRareEventRollPercent[f] < firmRareEventProbabilityPercent) {
+                        int64_t rareEventImpact = (int64_t)percentFloorU64(
+                            localFirmProductionCost[f],
+                            localFirmRareEventImpactPercent[f]
+                        );
+
+                        if (localFirmRareEventIsPositive[f]) {
+                            localFirmLiquidity[f] += rareEventImpact;
+                        }
+                        else {
+                            localFirmLiquidity[f] -= rareEventImpact;
+                        }
+                    }
 
                     // A.5: Repay bank loans (firmRepayPercent % of the loan)
-
                     // If liquidity is smaller than the percentage of the loan
                     // -> Pay all of liquidity
-
                     // If liquidity is negative
                     // -> Don't pay at all
-
                     repayFirmLoansProRata(
                         localFirmLiquidity[f],
                         localFirmDebts[f],
