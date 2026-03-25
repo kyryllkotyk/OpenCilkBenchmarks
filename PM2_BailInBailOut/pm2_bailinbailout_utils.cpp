@@ -45,6 +45,19 @@ bool BailInBailOut::errorDetectionAndClamping(
     unsigned short& shockMultiplierMax,
     unsigned short& minInterestRate,
     unsigned short& maxInterestRate,
+    unsigned short& firmShockMinPercent,
+    unsigned short& firmShockMaxPercent,
+    unsigned short& firmProfitMinPercent,
+    unsigned short& firmProfitMaxPercent,
+    unsigned short& firmOperatingCostMinPercent,
+    unsigned short& firmOperatingCostMaxPercent,
+    unsigned short& firmShockProfitMultiplierMinPercent,
+    unsigned short& firmShockProfitMultiplierMaxPercent,
+    unsigned short& firmInitialLiquidityMultiplierMinPercent,
+    unsigned short& firmInitialLiquidityMultiplierMaxPercent,
+    unsigned short& firmRareEventProbabilityPercent,
+    unsigned short& firmRareEventImpactMinPercent,
+    unsigned short& firmRareEventImpactMaxPercent,
 
     unsigned short& interbankDensity,
     const unsigned short maxInterbankLenderSamplingK,
@@ -82,24 +95,48 @@ bool BailInBailOut::errorDetectionAndClamping(
     bailInCoveragePercent = clampPercent(bailInCoveragePercent);
     bailOutCoveragePercent = clampPercent(bailOutCoveragePercent);
 
-    // Ensure that the min & max make sense (max >= min)
-    if (profitMultiplierMin > profitMultiplierMax) {
-        unsigned short tmp = profitMultiplierMin;
-        profitMultiplierMin = profitMultiplierMax;
-        profitMultiplierMax = tmp;
-    }
+    firmShockMinPercent = clampPercent(firmShockMinPercent);
+    firmShockMaxPercent = clampPercent(firmShockMaxPercent);
+    firmProfitMinPercent = clampPercent(firmProfitMinPercent);
+    firmProfitMaxPercent = clampPercent(firmProfitMaxPercent);
+    firmOperatingCostMinPercent = clampPercent(firmOperatingCostMinPercent);
+    firmOperatingCostMaxPercent = clampPercent(firmOperatingCostMaxPercent);
+    firmShockProfitMultiplierMinPercent = 
+        clampPercent(firmShockProfitMultiplierMinPercent);
+    firmShockProfitMultiplierMaxPercent = 
+        clampPercent(firmShockProfitMultiplierMaxPercent);
+    firmInitialLiquidityMultiplierMinPercent = 
+        clampPercent(firmInitialLiquidityMultiplierMinPercent);
+    firmInitialLiquidityMultiplierMaxPercent = 
+        clampPercent(firmInitialLiquidityMultiplierMaxPercent);
+    firmRareEventProbabilityPercent = 
+        clampPercent(firmRareEventProbabilityPercent);
+    firmRareEventImpactMinPercent = clampPercent(firmRareEventImpactMinPercent);
+    firmRareEventImpactMaxPercent = clampPercent(firmRareEventImpactMaxPercent);
 
-    if (shockMultiplierMin > shockMultiplierMax) {
-        unsigned short tmp = shockMultiplierMin;
-        shockMultiplierMin = shockMultiplierMax;
-        shockMultiplierMax = tmp;
-    }
+    auto swapIfMinGreaterThanMax = [](unsigned short& minVal, unsigned short& maxVal) {
+        if (minVal > maxVal) {
+            unsigned short tmp = minVal;
+            minVal = maxVal;
+            maxVal = tmp;
+        }
+    };
 
-    if (minInterestRate > maxInterestRate) {
-        unsigned short tmp = minInterestRate;
-        minInterestRate = maxInterestRate;
-        maxInterestRate = tmp;
-    }
+
+    swapIfMinGreaterThanMax(profitMultiplierMin, profitMultiplierMax);
+    swapIfMinGreaterThanMax(shockMultiplierMin, shockMultiplierMax);
+    swapIfMinGreaterThanMax(minInterestRate, maxInterestRate);
+
+    swapIfMinGreaterThanMax(firmShockMinPercent, firmShockMaxPercent);
+    swapIfMinGreaterThanMax(firmProfitMinPercent, firmProfitMaxPercent);
+    swapIfMinGreaterThanMax(firmOperatingCostMinPercent,
+        firmOperatingCostMaxPercent);
+    swapIfMinGreaterThanMax(firmShockProfitMultiplierMinPercent,
+        firmShockProfitMultiplierMaxPercent);
+    swapIfMinGreaterThanMax(firmInitialLiquidityMultiplierMinPercent,
+        firmInitialLiquidityMultiplierMaxPercent);
+    swapIfMinGreaterThanMax(firmRareEventImpactMinPercent, 
+        firmRareEventImpactMaxPercent);
 
     // <!=========================!Error Detection!=========================>
 
@@ -271,6 +308,30 @@ unsigned int BailInBailOut::getInterestRate(
     (seed, minVal, maxVal);
 
     return rate;
+}
+
+unsigned short BailInBailOut::randomPercentFromStream(
+    const uint64_t baseSeed,
+    const unsigned int run,
+    const unsigned int step,
+    const unsigned int globalId,
+    const unsigned int streamTag,
+    const unsigned short minPercent,
+    const unsigned short maxPercent
+) {
+    uint64_t seed = makeSeed(
+        baseSeed,
+        run,
+        step,
+        globalId,
+        streamTag
+    );
+
+    return (unsigned short)randomInRangeFromSeed(
+        seed,
+        minPercent,
+        maxPercent
+    );
 }
 
 //=============================================================================
