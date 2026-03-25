@@ -202,6 +202,166 @@ void BailInBailOut::repayFirmLoansProRata(
     }
 }
 
+void BailInBailOut::a0BuildFirmPhaseAParameters(
+    const uint64_t baseSeed,
+    const unsigned int run,
+    const unsigned int step,
+    const unsigned int firmGlobalStartIndex,
+    const unsigned int firmCountForRank,
+
+    const unsigned short firmShockMinPercent,
+    const unsigned short firmShockMaxPercent,
+    const unsigned short firmProfitMinPercent,
+    const unsigned short firmProfitMaxPercent,
+    const unsigned short firmOperatingCostMinPercent,
+    const unsigned short firmOperatingCostMaxPercent,
+    const unsigned short firmShockProfitMultiplierMinPercent,
+    const unsigned short firmShockProfitMultiplierMaxPercent,
+    const unsigned short firmRareEventImpactMinPercent,
+    const unsigned short firmRareEventImpactMaxPercent,
+
+    const uint64_t streamFirmShockPercent,
+    const uint64_t streamFirmProfitPercent,
+    const uint64_t streamFirmOperatingCostPercent,
+    const uint64_t streamFirmShockProfitMultiplierPercent,
+    const uint64_t streamFirmRareEventProbability,
+    const uint64_t streamFirmRareEventImpactPercent,
+    const uint64_t streamFirmRareEventSign,
+
+    vector<unsigned short>& localFirmShockMinPercent,
+    vector<unsigned short>& localFirmShockMaxPercent,
+    vector<unsigned short>& localFirmProfitMinPercent,
+    vector<unsigned short>& localFirmProfitMaxPercent,
+    vector<unsigned short>& localFirmOperatingCostPercent,
+    vector<unsigned short>& localFirmShockProfitMultiplierPercent,
+    vector<unsigned short>& localFirmRareEventRollPercent,
+    vector<unsigned short>& localFirmRareEventImpactPercent,
+    vector<bool>& localFirmRareEventIsPositive
+) {
+    for (unsigned int localFirm = 0; localFirm < firmCountForRank; localFirm++) {
+        unsigned int firmGlobalId = firmGlobalStartIndex + localFirm;
+
+        unsigned short shockA = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmShockPercent,
+            firmShockMinPercent,
+            firmShockMaxPercent
+        );
+
+        unsigned short shockB = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmShockPercent + 1ULL,
+            firmShockMinPercent,
+            firmShockMaxPercent
+        );
+
+        if (shockA <= shockB) {
+            localFirmShockMinPercent[localFirm] = shockA;
+            localFirmShockMaxPercent[localFirm] = shockB;
+        }
+        else {
+            localFirmShockMinPercent[localFirm] = shockB;
+            localFirmShockMaxPercent[localFirm] = shockA;
+        }
+
+        unsigned short profitA = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmProfitPercent,
+            firmProfitMinPercent,
+            firmProfitMaxPercent
+        );
+
+        unsigned short profitB = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmProfitPercent + 1ULL,
+            firmProfitMinPercent,
+            firmProfitMaxPercent
+        );
+
+        if (profitA <= profitB) {
+            localFirmProfitMinPercent[localFirm] = profitA;
+            localFirmProfitMaxPercent[localFirm] = profitB;
+        }
+        else {
+            localFirmProfitMinPercent[localFirm] = profitB;
+            localFirmProfitMaxPercent[localFirm] = profitA;
+        }
+
+        localFirmOperatingCostPercent[localFirm] = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmOperatingCostPercent,
+            firmOperatingCostMinPercent,
+            firmOperatingCostMaxPercent
+        );
+
+        localFirmShockProfitMultiplierPercent[localFirm] = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmShockProfitMultiplierPercent,
+            firmShockProfitMultiplierMinPercent,
+            firmShockProfitMultiplierMaxPercent
+        );
+
+        localFirmInitialLiquidityMultiplierPercent[localFirm] = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmInitialLiquidityMultiplierPercent,
+            firmInitialLiquidityMultiplierMinPercent,
+            firmInitialLiquidityMultiplierMaxPercent
+        );
+
+        localFirmRareEventRollPercent[localFirm] = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmRareEventProbability,
+            0,
+            100
+        );
+
+        localFirmRareEventImpactPercent[localFirm] = randomPercentFromStream(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmRareEventImpactPercent,
+            firmRareEventImpactMinPercent,
+            firmRareEventImpactMaxPercent
+        );
+
+        uint64_t rareEventSignSeed = makeSeed(
+            baseSeed,
+            run,
+            step,
+            firmGlobalId,
+            streamFirmRareEventSign
+        );
+
+        localFirmRareEventIsPositive[localFirm] = ((rareEventSignSeed & 1ULL) != 0ULL);
+
+    }
+}
+
 MPI_Datatype BailInBailOut::a0MakeFirmWorkforceDeltaType(){
     MPI_Datatype t;
 
