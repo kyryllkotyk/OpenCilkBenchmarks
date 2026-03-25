@@ -49,12 +49,12 @@ void BailInBailOut::c1SendMoneyToBanks(
     vector<vector<c1BankDeltaMessage>> toRank(mpiSize);
 
     for (unsigned int bankGID = 0; bankGID < bankCountTotal; bankGID++) {
-        int64_t delta = wageDepositBuffer[bankGID] + 
+        int64_t delta = wageDepositBuffer[bankGID] +
             bankIncomingFromFirmRepay[bankGID];
         if (delta == 0) continue;
 
         unsigned int ownerRank = ownerRankFromGlobalId(
-            bankCountTotal, 
+            bankCountTotal,
             mpiSize,
             bankGID
         );
@@ -195,7 +195,7 @@ void BailInBailOut::d2ProcessFirmLoanRequests(
 
     // Process each local bank's requests 
     for (unsigned int localBank = 0; localBank < bankCountForRank; localBank++) {
-        
+
         vector<FirmLoanRequest>& reqs = requestsByLocalBank[localBank];
         // Skip if no requests
         if (reqs.empty()) {
@@ -230,44 +230,82 @@ void BailInBailOut::d2ProcessFirmLoanRequests(
             continue;
         }
 
-        for (unsigned int k = 0; k < reqs.size(); k++) {
-            FirmLoanRequest& req = reqs[k];
+        // Pro-rata allocation: all requesting firms share capacity proportionally
+        // instead of first-come-first-served by firm ID
+        {
+            const size_t n = reqs.size();
 
-            if (remainingToLend == 0) {
-                break;
+            uint64_t totalRequested = 0;
+            for (size_t k = 0; k < n; k++) {
+                totalRequested += reqs[k].amountRequested;
             }
 
-            uint64_t grant = req.amountRequested;
-            if (grant > remainingToLend) grant = remainingToLend;
+            vector<uint64_t> grants(n, 0);
+            vector<uint64_t> remainders(n, 0);
+            uint64_t sumGrants = 0;
 
-            if (grant == 0) continue;
-
-            // Record acceptance to firm owner
-            unsigned int firmOwner = ownerRankFromGlobalId(
-                firmCountTotal,
-                mpiSize,
-                req.firmGlobalId
-            );
-
-            firmLoanAcceptancesToRank[firmOwner].push_back(
-                d2FirmLoanAcceptance{
-                    req.firmGlobalId,
-                    req.lenderBankGlobalId,
-                    grant
+            for (size_t k = 0; k < n; k++) {
+                unsigned __int128 scaled =
+                    (unsigned __int128)remainingToLend * reqs[k].amountRequested;
+                grants[k] = (uint64_t)(scaled / totalRequested);
+                remainders[k] = (uint64_t)(scaled % totalRequested);
+                // Never grant more than requested
+                if (grants[k] > reqs[k].amountRequested) {
+                    grants[k] = reqs[k].amountRequested;
                 }
-            );
+                sumGrants += grants[k];
+            }
 
-            // Track how much this bank is lending this step (apply in D.3)
-            bankFirmLoanOutflow[localBank] += grant;
+            // Distribute leftover 1-by-1 to largest-remainder firms first,
+            // breaking ties by lowest firm global ID for determinism
+            uint64_t leftover = remainingToLend - sumGrants;
+            if (leftover > 0) {
+                vector<size_t> order;
+                order.reserve(n);
+                for (size_t k = 0; k < n; k++) {
+                    if (reqs[k].amountRequested > grants[k]) {
+                        order.push_back(k);
+                    }
+                }
+                sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                    if (remainders[a] != remainders[b]) {
+                        return remainders[a] > remainders[b];
+                    }
+                    return reqs[a].firmGlobalId < reqs[b].firmGlobalId;
+                    });
+                for (size_t i = 0; i < order.size() && leftover > 0; i++) {
+                    grants[order[i]]++;
+                    leftover--;
+                }
+            }
 
-            remainingToLend -= grant;
+            // Send acceptances
+            for (size_t k = 0; k < n; k++) {
+                uint64_t grant = grants[k];
+                if (grant == 0) {
+                    continue;
+                }
+                unsigned int firmOwner = ownerRankFromGlobalId(
+                    firmCountTotal,
+                    mpiSize,
+                    reqs[k].firmGlobalId
+                );
+                firmLoanAcceptancesToRank[firmOwner].push_back(
+                    d2FirmLoanAcceptance{
+                        reqs[k].firmGlobalId,
+                        reqs[k].lenderBankGlobalId,
+                        grant
+                    }
+                );
+                bankFirmLoanOutflow[localBank] += grant;
+            }
         }
     }
 
     // This inbox is one step use
     receivedLoanRequests.clear();
 }
-    
+
 MPI_Datatype BailInBailOut::d4MakeFirmLoanAcceptanceType() {
     MPI_Datatype raw;
 
@@ -308,8 +346,8 @@ void BailInBailOut::d4SendFirmLoanAcceptances(
 
 void BailInBailOut::d5ApplyFirmLoanAcceptances(
     unsigned int firmGlobalStartIndex,
-    vector<int64_t>& localFirmLiquidity,                 
-    vector<vector<DebtEntry>>& localFirmDebts,       
+    vector<int64_t>& localFirmLiquidity,
+    vector<vector<DebtEntry>>& localFirmDebts,
     vector<d2FirmLoanAcceptance>& receivedAcceptances
 ) {
     for (unsigned int i = 0; i < receivedAcceptances.size(); i++) {
@@ -368,8 +406,8 @@ void BailInBailOut::e1RepayInterbankLoans(
     unsigned int bankGlobalStartIndex,
     unsigned int bankCountForRank,
     unsigned short bankRepayPercent,
-    vector<int64_t>& localBankLiquidity,                 
-    vector<vector<DebtEntry>>& localBankDebts         
+    vector<int64_t>& localBankLiquidity,
+    vector<vector<DebtEntry>>& localBankDebts
 ) {
     (void)mpiRank;
 
@@ -377,14 +415,14 @@ void BailInBailOut::e1RepayInterbankLoans(
     vector<vector<e1InterbankRepaymentMessage>> toRank(mpiSize);
 
     for (unsigned int localBank = 0; localBank < bankCountForRank; localBank++) {
-        
+
         // Don't repa if negative liquidity
         if (localBankLiquidity[localBank] <= 0) {
             continue;
         }
 
         vector<DebtEntry>& debts = localBankDebts[localBank];
-        
+
         // Skip if nothing to repay
         if (debts.empty()) {
             continue;
@@ -406,9 +444,9 @@ void BailInBailOut::e1RepayInterbankLoans(
                 continue;
             }
 
-            // Don’t repay more cash than borrower has
+            // Don't repay more cash than borrower has
             uint64_t cash =
-                (localBankLiquidity[localBank] > 0) ? 
+                (localBankLiquidity[localBank] > 0) ?
                 (uint64_t)localBankLiquidity[localBank] : 0ULL;
 
             // If there's not enough to pay off the desired amount,
@@ -416,7 +454,7 @@ void BailInBailOut::e1RepayInterbankLoans(
             if (repay > cash) {
                 repay = cash;
             }
-            
+
             // If there's nothing left to repay, stop
             if (repay == 0) {
                 break;
@@ -440,7 +478,7 @@ void BailInBailOut::e1RepayInterbankLoans(
             toRank[ownerRank].push_back(e1InterbankRepaymentMessage{
                 lenderGlobalId,
                 repay
-            });
+                });
 
             // If borrower cash is now below 0, stop repaying further debts
             if (localBankLiquidity[localBank] <= 0) {
@@ -923,37 +961,74 @@ void BailInBailOut::e3BorrowInterbankIfNegativeLiquidity(
             continue;
         }
 
-        for (unsigned int k = 0; k < reqs.size(); k++) {
-            if (remainingToLend == 0) {
-                break;
+        // Pro-rata allocation: all requesting borrowers share capacity
+        // proportionally instead of first-come-first-served by borrower ID
+        {
+            const size_t n = reqs.size();
+
+            uint64_t totalRequested = 0;
+            for (size_t k = 0; k < n; k++) {
+                totalRequested += reqs[k].amountRequested;
             }
 
-            e3InterbankLoanRequest& req = reqs[k];
+            vector<uint64_t> grants(n, 0);
+            vector<uint64_t> remainders(n, 0);
+            uint64_t sumGrants = 0;
 
-            uint64_t grant = req.amountRequested;
-            if (grant > remainingToLend) {
-                grant = remainingToLend;
+            for (size_t k = 0; k < n; k++) {
+                unsigned __int128 scaled =
+                    (unsigned __int128)remainingToLend * reqs[k].amountRequested;
+                grants[k] = (uint64_t)(scaled / totalRequested);
+                remainders[k] = (uint64_t)(scaled % totalRequested);
+                // Never grant more than requested
+                if (grants[k] > reqs[k].amountRequested) {
+                    grants[k] = reqs[k].amountRequested;
+                }
+                sumGrants += grants[k];
             }
 
-            if (grant == 0) {
-                continue;
+            // Distribute leftover 1-by-1 to largest-remainder borrowers first,
+            // breaking ties by lowest borrower global ID for determinism
+            uint64_t leftover = remainingToLend - sumGrants;
+            if (leftover > 0) {
+                vector<size_t> order;
+                order.reserve(n);
+                for (size_t k = 0; k < n; k++) {
+                    if (reqs[k].amountRequested > grants[k]) {
+                        order.push_back(k);
+                    }
+                }
+                sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                    if (remainders[a] != remainders[b]) {
+                        return remainders[a] > remainders[b];
+                    }
+                    return reqs[a].borrowerBankGlobalId < reqs[b].borrowerBankGlobalId;
+                    });
+                for (size_t i = 0; i < order.size() && leftover > 0; i++) {
+                    grants[order[i]]++;
+                    leftover--;
+                }
             }
 
-            // Lender subtracts instantly
-            localBankLiquidity[localLender] -= (int64_t)grant;
-            remainingToLend -= grant;
+            // Apply grants: lender subtracts, send acceptances to borrowers
+            for (size_t k = 0; k < n; k++) {
+                uint64_t grant = grants[k];
+                if (grant == 0) {
+                    continue;
+                }
+                localBankLiquidity[localLender] -= (int64_t)grant;
 
-            unsigned int borrowerOwnerRank = ownerRankFromGlobalId(
-                bankCountTotal,
-                mpiSize,
-                req.borrowerBankGlobalId
-            );
-
-            acceptancesToRank[borrowerOwnerRank].push_back(e3InterbankLoanAcceptance{
-                req.borrowerBankGlobalId,
-                req.lenderBankGlobalId,
-                grant
-                });
+                unsigned int borrowerOwnerRank = ownerRankFromGlobalId(
+                    bankCountTotal,
+                    mpiSize,
+                    reqs[k].borrowerBankGlobalId
+                );
+                acceptancesToRank[borrowerOwnerRank].push_back(e3InterbankLoanAcceptance{
+                    reqs[k].borrowerBankGlobalId,
+                    reqs[k].lenderBankGlobalId,
+                    grant
+                    });
+            }
         }
     }
 
@@ -1047,7 +1122,7 @@ void BailInBailOut::f1f2UpdateBankDistressAndApplyIntervention(
         if (policy == 0) {
             // Check if there is some debt
             if (totalDebtBefore > 0) {
-                uint64_t targetDebtRemoval = 
+                uint64_t targetDebtRemoval =
                     percentFloorU64(deficitBefore, bailInCoveragePercent);
 
                 // If the target removal is greater than what is needed,
